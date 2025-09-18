@@ -198,7 +198,7 @@ class VAE(torch.nn.Module):
         dataset: Dataset,
         optimizer: torch.optim.Optimizer,
         epochs: int = EPOCHS,
-    ) -> None:
+    ) -> list[float]:
         """Train the VAE model.
 
         Args:
@@ -206,7 +206,12 @@ class VAE(torch.nn.Module):
             dataset (Dataset): Dataset object.
             optimizer (torch.optim.Optimizer): Optimizer for training.
             epochs (int, optional): Number of training epochs. Defaults to EPOCHS.
+
+        Returns:
+            list[float]: History of training losses.
         """
+
+        loss_history = []
 
         for epoch in range(epochs):
             # Set the model to training mode
@@ -244,7 +249,10 @@ class VAE(torch.nn.Module):
                 train_loss += loss.item()
 
             avg_loss = train_loss / len(dataset)  # type: ignore
+            loss_history.append(avg_loss)
             print(f"Epoch [{epoch + 1}/{epochs}], Loss: {avg_loss:.4f}")
+
+        return loss_history
 
     def generate_images(self, num_images: int) -> torch.Tensor:
         """Generate new images by sampling from the latent space.
@@ -269,12 +277,20 @@ class VAE(torch.nn.Module):
 
         return generated_images
 
-    def plot_reconstructions(self, dataloader: DataLoader, num_images: int = 8) -> None:
+    def plot_reconstructions(
+        self,
+        dataloader: DataLoader,
+        root_path: str,
+        num_images: int = 8,
+        file_name: str = "default.png",
+    ) -> None:
         """Plot original and reconstructed images.
 
         Args:
             dataloader (DataLoader): DataLoader for the dataset.
             num_images (int, optional): Number of images to plot. Defaults to 8.
+            root_path (str): Root path to save the reconstructed images.
+            file_name (str, optional): File name to save the reconstructed images. Defaults to "
         """
 
         # Set the model to evaluation mode
@@ -305,7 +321,13 @@ class VAE(torch.nn.Module):
                 ax.set_title("Reconstructed")
 
             plt.tight_layout()
-            plt.show()
+
+            # Create directory to save reconstructed images if it doesn't exist
+            os.makedirs(root_path, exist_ok=True)
+
+            # Save the reconstructed images
+            plt.savefig(file_name)
+            plt.close()
 
     def plot_generated_images(self, num_images: int = 8) -> None:
         """Plot generated images.
@@ -327,7 +349,44 @@ class VAE(torch.nn.Module):
             ax.set_title("Generated")
 
         plt.tight_layout()
-        plt.show()
+        plt.close()
+
+
+def plot_loss_curve(
+    loss_history: dict[str, list[float]],
+    root_path: str,
+    file_name: str = "loss_curve.png",
+) -> None:
+    """Plot the training loss curve.
+
+    Args:
+        loss_history (dict[str, list[float]]): Dictionary containing loss histories.
+        root_path (str): Directory to save the loss curve plot.
+        file_name (str, optional): File name to save the loss curve plot. Defaults to "loss_curve.png".
+    """
+
+    # Set the figure size
+    plt.figure(figsize=(12, 8))
+
+    # Plot the loss history for each configuration
+    for label, history in loss_history.items():
+        plt.plot(history, label=label)
+
+    plt.title("Training Loss Curve")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.legend()
+
+    plt.grid(True)
+    plt.tight_layout()
+
+    # Save the plot to the results folder
+
+    file_name = file_name if file_name.endswith(".png") else f"{file_name}.png"
+    loss_plot_path = os.path.join(root_path, file_name)
+    plt.savefig(loss_plot_path)
+
+    plt.close()
 
 
 if __name__ == "__main__":
@@ -346,28 +405,52 @@ if __name__ == "__main__":
     )
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    epochs = [10, 20, 30]
+    epochs_to_test = [150]
+    latent_dims_to_test = [128]
+    learning_rates_to_test = [1e-3, 2e-2, 5e-2]
 
-    for epoch in epochs:
-        # Initizialize the VAE model
-        model = VAE(latent_dim=LATENT_DIM).to(DEVICE)
+    # Dictionary for storing loss histories
+    loss_history = {}
 
-        # Define the optimizer (Adam for better convergence)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    for epoch in epochs_to_test:
+        for latent_dim in latent_dims_to_test:
+            for learning_rate in learning_rates_to_test:
+                # Create a unique file_name for this run's results
+                file_name = f"output/epochs_{epoch}_latent_{latent_dim}_lr_{learning_rate}.png"
 
-        print("\n")
-        print("-" * 50)
-        print(" " * 15 + "Starting Training")
-        print(f" * Training on device: {DEVICE}")
-        print(f" * Number of samples in dataset: {len(dataset)}")
-        print(f" * Batch size: {BATCH_SIZE}")
-        print(f" * Number of epochs: {EPOCHS}")
-        print(f" * Latent dimension: {LATENT_DIM}")
-        print("-" * 50)
-        print("\n")
+                # Initialize the VAE model
+                model = VAE(latent_dim=latent_dim).to(DEVICE)
 
-        # Training loop
-        model.train_model(dataloader, dataset, optimizer, epochs=epoch)
+                # Define the optimizer (Adam for better convergence)
+                optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        # Plot some reconstructions
-        model.plot_reconstructions(dataloader, num_images=8)
+                print("\n")
+                print("-" * 50)
+                print(" " * 15 + "Starting Training")
+                print(f" * Training on device: {DEVICE}")
+                print(f" * Number of samples in dataset: {len(dataset)}")
+                print(f" * Batch size: {BATCH_SIZE}")
+                print(f" * Number of epochs: {epoch}")
+                print(f" * Learning rate: {learning_rate}")
+                print(f" * Latent dimension: {latent_dim}")
+                print("-" * 50)
+                print("\n")
+
+                # Training loop
+                loss = model.train_model(dataloader, dataset, optimizer, epochs=epoch)
+
+                # Save loss history to a dictonary
+                key = f"Epochs: {epoch}, Latent_dim: {latent_dim}, LR: {learning_rate}"
+                loss_history[key] = loss
+
+                # Plot some reconstructions
+                model.plot_reconstructions(
+                    dataloader, num_images=8, root_path="output", file_name=file_name
+                )
+
+    # Plot the loss curve
+    plot_loss_curve(
+        loss_history,
+        root_path="output/",
+        file_name="loss_curve_all_configs.png",
+    )
