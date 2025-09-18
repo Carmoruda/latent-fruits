@@ -1,12 +1,12 @@
 import os
 
-import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import torchvision.transforms as transforms
+from matplotlib import pyplot as plt
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 
 # Configuration
 
@@ -192,6 +192,60 @@ class VAE(torch.nn.Module):
 
         return reconstructed, mu, logvar
 
+    def train_model(
+        self,
+        dataloader: DataLoader,
+        dataset: Dataset,
+        optimizer: torch.optim.Optimizer,
+        epochs: int = EPOCHS,
+    ) -> None:
+        """Train the VAE model.
+
+        Args:
+            dataloader (DataLoader): DataLoader for the dataset.
+            dataset (Dataset): Dataset object.
+            optimizer (torch.optim.Optimizer): Optimizer for training.
+            epochs (int, optional): Number of training epochs. Defaults to EPOCHS.
+        """
+
+        for epoch in range(epochs):
+            # Set the model to training mode
+            self.train()
+
+            # Track the training loss
+            train_loss = 0
+
+            # Iterate over the data loader
+            #    i = batch index
+            #    (images) = batch of images
+            for i, (images) in enumerate(dataloader):
+                # Move the images to the device (GPU or CPU)
+                images = images.to(DEVICE)
+
+                # Forward pass
+                reconstructed_images, mu, logvar = model(images)
+
+                # Calculate the reconstruction loss (Binary Cross Entropy)
+                reconstructuion_loss = F.binary_cross_entropy(
+                    reconstructed_images, images, reduction="sum"
+                )
+
+                # Calculate the KL divergence loss
+                kl_divergenece_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+                # Total loss (the sum of reconstruction and KL divergence losses)
+                loss = reconstructuion_loss + kl_divergenece_loss
+
+                # Backward pass and optimization
+                optimizer.zero_grad()  # Clear previous gradients
+                loss.backward()  # Backpropagation (Calculate gradients)
+                optimizer.step()  # Update weights
+
+                train_loss += loss.item()
+
+            avg_loss = train_loss / len(dataset)  # type: ignore
+            print(f"Epoch [{epoch + 1}/{epochs}], Loss: {avg_loss:.4f}")
+
     def generate_images(self, num_images: int) -> torch.Tensor:
         """Generate new images by sampling from the latent space.
 
@@ -232,7 +286,7 @@ class VAE(torch.nn.Module):
             images = images[:num_images]
 
             # Reconstruct the images using the VAE
-            reconstructed_images, _, _ = model(images)
+            reconstructed_images, _, _ = self(images)
 
             # Plot the original and reconstructed images
             fig, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
@@ -292,62 +346,28 @@ if __name__ == "__main__":
     )
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    # Initizialize the VAE model
-    model = VAE(latent_dim=LATENT_DIM).to(DEVICE)
+    epochs = [10, 20, 30]
 
-    # Define the optimizer (Adam for better convergence)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    for epoch in epochs:
+        # Initizialize the VAE model
+        model = VAE(latent_dim=LATENT_DIM).to(DEVICE)
 
-    print(f"Training on device: {DEVICE}")
-    print(f"Number of samples in dataset: {len(dataset)}")
-    print(f"Batch size: {BATCH_SIZE}")
-    print(f"Number of epochs: {EPOCHS}")
-    print(f"Latent dimension: {LATENT_DIM}")
+        # Define the optimizer (Adam for better convergence)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    print("\n")
-    print("-" * 50)
-    print(" " * 15 + "Starting Training")
-    print("-" * 50)
-    print("\n")
+        print("\n")
+        print("-" * 50)
+        print(" " * 15 + "Starting Training")
+        print(f" * Training on device: {DEVICE}")
+        print(f" * Number of samples in dataset: {len(dataset)}")
+        print(f" * Batch size: {BATCH_SIZE}")
+        print(f" * Number of epochs: {EPOCHS}")
+        print(f" * Latent dimension: {LATENT_DIM}")
+        print("-" * 50)
+        print("\n")
 
-    # Training loop
-    for epoch in range(EPOCHS):
-        # Set the model to training mode
-        model.train()
+        # Training loop
+        model.train_model(dataloader, dataset, optimizer, epochs=epoch)
 
-        # Track the training loss
-        train_loss = 0
-
-        # Iterate over the data loader
-        #    i = batch index
-        #    (images) = batch of images
-        for i, (images) in enumerate(dataloader):
-            # Move the images to the device (GPU or CPU)
-            images = images.to(DEVICE)
-
-            # Forward pass
-            reconstructed_images, mu, logvar = model(images)
-
-            # Calculate the reconstruction loss (Binary Cross Entropy)
-            reconstructuion_loss = F.binary_cross_entropy(
-                reconstructed_images, images, reduction="sum"
-            )
-
-            # Calculate the KL divergence loss
-            kl_divergenece_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-            # Total loss (the sum of reconstruction and KL divergence losses)
-            loss = reconstructuion_loss + kl_divergenece_loss
-
-            # Backward pass and optimization
-            optimizer.zero_grad()  # Clear previous gradients
-            loss.backward()  # Backpropagation (Calculate gradients)
-            optimizer.step()  # Update weights
-
-            train_loss += loss.item()
-
-        avg_loss = train_loss / len(dataset)
-        print(f"Epoch [{epoch + 1}/{EPOCHS}], Loss: {avg_loss:.4f}")
-
-    # Plot some reconstructions
-    model.plot_reconstructions(dataloader, num_images=8)
+        # Plot some reconstructions
+        model.plot_reconstructions(dataloader, num_images=8)
