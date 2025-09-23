@@ -405,9 +405,9 @@ if __name__ == "__main__":
     )
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    epochs_to_test = [150]
+    epochs_to_test = [30, 50, 150, 200]
     latent_dims_to_test = [128]
-    learning_rates_to_test = [1e-3, 2e-2, 5e-2]
+    learning_rates_to_test = [1e-3]
 
     # Dictionary for storing loss histories
     loss_history = {}
