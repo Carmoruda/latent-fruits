@@ -15,7 +15,7 @@ class VAEDataset(Dataset):
         Dataset (torch.utils.data.Dataset): PyTorch Dataset class.
     """
 
-    def __init__(self, url, dataset_path, transform=None) -> None:
+    def __init__(self, url, dataset_path, download=True, transform=None) -> None:
         """Initialize the dataset. Assigns URL, dataset path, optional
         transformations, downloads the dataset and lists image files.
 
@@ -30,7 +30,8 @@ class VAEDataset(Dataset):
         self.dataset_path = dataset_path
         self.transform = transform
 
-        self.download()
+        if download:
+            self.download()
 
         # List all image files in the dataset directory and store their names if they are images
         self.images = [
@@ -46,7 +47,14 @@ class VAEDataset(Dataset):
         Returns:
             int: Number of samples in the dataset.
         """
-        return len(self.images)
+        number = len(self.images)
+
+        if number <= 0:
+            raise ValueError(
+                f"No se encontraron imágenes en el directorio '{self.dataset_path}'. Verifica que la descarga y extracción fue exitosa y que hay imágenes en la carpeta."
+            )
+
+        return number
 
     def __getitem__(self, index) -> Image.Image:
         """Get a sample from the dataset.
@@ -94,10 +102,35 @@ class VAEDataset(Dataset):
             zip_ref.extractall(extract_to)
 
         # Move dataset to ./data
-        data_src = os.path.join(extract_to, "extracted", self.dataset_path)
+        extracted_root = os.path.join(extract_to, "cats")
         data_dst = os.path.join(extract_to, self.dataset_path)
-        shutil.move(data_src, data_dst)
 
-        # (Optional) Remove the ./extracted folder and downloaded zip
-        shutil.rmtree(os.path.join(extract_to, "extracted"))
+        # Search for the folder containing images inside 'extracted'
+        data_src = None
+        for root, dirs, files in os.walk(extracted_root):
+            if any(
+                file.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".gif"))
+                for file in files
+            ):
+                data_src = root
+                break
+
+        if data_src is None:
+            raise RuntimeError(
+                f"No se encontró ninguna carpeta con imágenes dentro de '{extracted_root}'."
+            )
+
+        # Create destination directory if it doesn't exist
+        if not os.path.exists(data_dst):
+            os.makedirs(data_dst)
+
+        # Move all images to data_dst
+        for file in os.listdir(data_src):
+            src_file = os.path.join(data_src, file)
+            dst_file = os.path.join(data_dst, file)
+            if os.path.isfile(src_file):
+                shutil.move(src_file, dst_file)
+
+        # Delete the extracted folder and zip file to clean up
+        shutil.rmtree(extracted_root)
         os.remove(output_zip)
