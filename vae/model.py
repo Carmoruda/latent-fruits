@@ -3,7 +3,7 @@ import os
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 DEVICE = None
 """Device in which to run the model."""
@@ -122,85 +122,97 @@ class VAE(torch.nn.Module):
 
     def train_model(
         self,
-        dataloader: DataLoader,
-        dataset: Dataset,
+        train_dataloader: DataLoader,
+        val_dataloader: DataLoader,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
         num_epochs: int = 10,
-    ) -> list[float]:
+    ) -> tuple[list[float], list[float]]:
         """Train the VAE model.
-
         Args:
-            dataloader (DataLoader): DataLoader for the dataset.
-            dataset (Dataset): Dataset object.
+            train_dataloader (DataLoader): DataLoader for the training dataset.
+            val_dataloader (DataLoader): DataLoader for the validation dataset.
             optimizer (torch.optim.Optimizer): Optimizer for training.
             scheduler (torch.optim.lr_scheduler.ReduceLROnPlateau): Learning rate scheduler.
-            num_epochs (int, optional): Number of training epochs. Defaults to EPOCHS.
-
+            num_epochs (int, optional): Number of training epochs. Defaults to 10.
         Returns:
-            list[float]: History of training losses.
+            tuple[list[float], list[float]]: Histories of training and validation losses.
         """
 
-        loss_history = []
+        train_loss_history = []
+        val_loss_history = []
 
         for epoch in range(num_epochs):
-            # Set the model to training mode
+            # --- Training Phase ---
             self.train()
-
-            # Track the training loss
-            train_loss = 0
-
-            # Iterate over the data loader
-            #    i = batch index
-            #    (images) = batch of images
-            for i, (images) in enumerate(dataloader):
-                # Move the images to the device (GPU or CPU)
+            total_train_loss = 0
+            for images in train_dataloader:
                 images = images.to(DEVICE)
 
                 # Forward pass
                 reconstructed_images, mu, logvar = self(images)
 
-                # Calculate the reconstruction loss (Binary Cross Entropy)
+                # Calculate loss
                 reconstruction_loss = F.binary_cross_entropy(
                     reconstructed_images, images, reduction="sum"
                 )
-
-                # print(f"Reconstruction Loss: {reconstruction_loss.item() / len(images)}")
-
-                # Calculate the KL divergence loss
                 kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-                # print(f"KL Divergence Loss: {kl_divergence_loss.item() / len(images)}")
-
-                # Total loss (the sum of reconstruction and KL divergence losses)
                 loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * 1e-4) / len(
                     images
                 )
 
-                # print(f"Total Loss: {loss.item()}")
-
                 # Backward pass and optimization
-                optimizer.zero_grad()  # Clear previous gradients
-                loss.backward()  # Backpropagation (Calculate gradients)
-                optimizer.step()  # Update weights
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-                train_loss += loss.item() / len(images)
-                # print(f"train_loss after batch {i}: {train_loss}")
+                total_train_loss += loss.item() / len(images)
 
-            avg_loss = train_loss / len(dataloader)
-            loss_history.append(avg_loss)
-            print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
+            avg_train_loss = total_train_loss / len(train_dataloader)
+            train_loss_history.append(avg_train_loss)
 
-            # Update the learning rate
-            scheduler.step(avg_loss)
+            # --- Validation Phase ---
+            self.eval()
+            total_val_loss = 0
+            with torch.no_grad():
+                for images in val_dataloader:
+                    images = images.to(DEVICE)
+                    reconstructed_images, mu, logvar = self(images)
+                    reconstruction_loss = F.binary_cross_entropy(
+                        reconstructed_images, images, reduction="sum"
+                    )
+                    kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+                    val_loss = (reconstruction_loss / len(images)) + (
+                        kl_divergence_loss * 1e-4
+                    ) / len(images)
+                    total_val_loss += val_loss.item() / len(images)
 
-        return loss_history
+            avg_val_loss = total_val_loss / len(val_dataloader)
+            val_loss_history.append(avg_val_loss)
 
-    def generate_images(self, num_images: int) -> torch.Tensor:
+            print(
+                f"Epoch [{epoch + 1}/{num_epochs}], "
+                f"Train Loss: {avg_train_loss:.4f}, "
+                f"Val Loss: {avg_val_loss:.4f}"
+            )
+
+            # Update the learning rate scheduler
+            scheduler.step(avg_val_loss)
+
+        return train_loss_history, val_loss_history
+
+    def generate_images(
+        self,
+        root_path: str,
+        num_images: int = 5,
+        file_name: str = "default.png",
+    ) -> torch.Tensor:
         """Generate new images by sampling from the latent space.
 
         Args:
             num_images (int): Number of images to generate.
+            root_path (str): Root path to save the generated images.
+            file_name (str, optional): File name to save the generated images. Defaults to "default.png".
 
         Returns:
             torch.Tensor: Generated images.
@@ -215,7 +227,33 @@ class VAE(torch.nn.Module):
             z = torch.randn(num_images, self.latent_dim).to(DEVICE)
 
             # Decode the latent vectors to generate images
-            generated_images = self.decoder(z)
+            z_expanded = self.decoder_input(z)
+            generated_images = self.decoder(z_expanded)
+
+            # Plot the original and reconstructed images
+            _, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
+
+            for i in range(num_images):
+                # Original images
+                ax = axes[0, i]
+                ax.imshow(generated_images[i].cpu().squeeze(), cmap="gray")
+                ax.axis("off")
+                ax.set_title("Original")
+
+                # Reconstructed images
+                ax = axes[1, i]
+                ax.imshow(generated_images[i].cpu().squeeze(), cmap="gray")
+                ax.axis("off")
+                ax.set_title("Reconstructed")
+
+            plt.tight_layout()
+
+            # Create directory to save reconstructed images if it doesn't exist
+            os.makedirs(root_path, exist_ok=True)
+
+            # Save the reconstructed images
+            plt.savefig(file_name)
+            plt.close()
 
         return generated_images
 
@@ -247,20 +285,14 @@ class VAE(torch.nn.Module):
             reconstructed_images, _, _ = self(images)
 
             # Plot the original and reconstructed images
-            fig, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
+            _, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
 
             for i in range(num_images):
                 # Original images
                 ax = axes[0, i]
                 ax.imshow(images[i].cpu().squeeze(), cmap="gray")
                 ax.axis("off")
-                ax.set_title("Original")
-
-                # Reconstructed images
-                ax = axes[1, i]
-                ax.imshow(reconstructed_images[i].cpu().squeeze(), cmap="gray")
-                ax.axis("off")
-                ax.set_title("Reconstructed")
+                ax.set_title(f"Generated {i + 1}")
 
             plt.tight_layout()
 

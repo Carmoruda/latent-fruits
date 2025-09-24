@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import torch
 from ray import train, tune
 from ray.tune.schedulers import ASHAScheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 
 from vae import VAE, VAEDataset
@@ -10,6 +12,8 @@ from vae.model import BATCH_SIZE, DEVICE
 
 
 def train_vae(config):
+    data_dir = Path(__file__).parent / "data"
+
     # Create the dataset
     transform = transforms.Compose(
         [
@@ -19,27 +23,46 @@ def train_vae(config):
     )
     dataset = VAEDataset(
         "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
-        "data",
+        data_dir,
         download=False,
         transform=transform,
     )
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    # Split dataset into training and validation
+    train_size = int(0.8 * len(dataset))
+    val_size = int((len(dataset) - train_size) / 2)
+    test_size = len(dataset) - train_size - val_size
+    train_dataset, val_dataset, test_dataset = random_split(
+        dataset, [train_size, val_size, test_size]
+    )
+
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # Model, Optimizer
     model = VAE(latent_dim=config["latent_dim"]).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=5)
 
-    for epoch in range(config["epochs"]):
-        loss = model.train_model(
-            dataloader, dataset, optimizer, scheduler, num_epochs=1
+    for _ in range(config["epochs"]):
+        train_loss, val_loss = model.train_model(
+            train_dataloader, val_dataloader, optimizer, scheduler, num_epochs=1
         )  # Train for 1 epoch
 
         # Report metrics to Ray Tune
-        train.report({"loss": loss[-1]})
+        train.report({"loss": val_loss[-1]})
+
+    model.plot_reconstructions(
+        dataloader=DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False),
+        root_path=str(data_dir),
+        file_name="reconstructions.png",
+    )
+
+    return model, test_dataloader
 
 
-if __name__ == "__main__":
+def hyperparameter_tuning():
     # Define the search space for hyperparameters
     search_space = {
         "lr": tune.grid_search([1e-3, 1e-4, 1e-5]),
@@ -89,3 +112,18 @@ if __name__ == "__main__":
     # best_model.load_state_dict(best_checkpoint["model_state"])
     print("-" * 50)
     print("\n")
+
+
+if __name__ == "__main__":
+    # hyperparameter_tuning()
+    data_dir = Path(__file__).parent / "data"
+
+    model, test_dataloader = train_vae(
+        {
+            "lr": 1e-3,
+            "latent_dim": 128,
+            "epochs": 20,
+        }
+    )
+
+    model.generate_images(root_path=str(data_dir), file_name="generated.png")
