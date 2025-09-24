@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -140,8 +141,17 @@ class VAE(torch.nn.Module):
                 latent_mus.append(mu.cpu().numpy())
 
         latent_mus = np.concatenate(latent_mus, axis=0)
+
         self.gmm = GaussianMixture(n_components=self.n_components, reg_covar=1e-6)
         print("Fitting GMM...")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="covariance is not symmetric positive-semidefinite.",
+                category=RuntimeWarning,
+            )
+
         self.gmm.fit(latent_mus)
         print("GMM fitted.")
 
