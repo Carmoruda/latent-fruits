@@ -125,6 +125,7 @@ class VAE(torch.nn.Module):
         dataloader: DataLoader,
         dataset: Dataset,
         optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
         num_epochs: int = 10,
     ) -> list[float]:
         """Train the VAE model.
@@ -133,6 +134,7 @@ class VAE(torch.nn.Module):
             dataloader (DataLoader): DataLoader for the dataset.
             dataset (Dataset): Dataset object.
             optimizer (torch.optim.Optimizer): Optimizer for training.
+            scheduler (torch.optim.lr_scheduler.ReduceLROnPlateau): Learning rate scheduler.
             num_epochs (int, optional): Number of training epochs. Defaults to EPOCHS.
 
         Returns:
@@ -188,6 +190,9 @@ class VAE(torch.nn.Module):
             avg_loss = train_loss / len(dataloader)
             loss_history.append(avg_loss)
             print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
+
+            # Update the learning rate
+            scheduler.step(avg_loss)
 
         return loss_history
 

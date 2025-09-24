@@ -1,21 +1,22 @@
 import torch
+from ray import train, tune
+from ray.tune.schedulers import ASHAScheduler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from vae import VAE, VAEDataset
 from vae.model import BATCH_SIZE, DEVICE
 
-if __name__ == "__main__":
-    # Define the transformations for the dataset
+
+def train_vae(config):
+    # Create the dataset
     transform = transforms.Compose(
         [
-            transforms.Grayscale(num_output_channels=1),  # Ensure image is grayscale
-            transforms.ToTensor(),  # Ensure image is converted to tensor
-            # transforms.Normalize((0.5,), (0.5,)),  # Normalize the image to [-1, 1]
+            transforms.Grayscale(num_output_channels=1),
+            transforms.ToTensor(),
         ]
     )
-
-    # Create the dataset
     dataset = VAEDataset(
         "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
         "data",
@@ -24,45 +25,67 @@ if __name__ == "__main__":
     )
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    epochs_to_test = [10]
-    latent_dims_to_test = [128]
-    learning_rates_to_test = [1e-3]
+    # Model, Optimizer
+    model = VAE(latent_dim=config["latent_dim"]).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=5)
 
-    # Dictionary for storing loss histories
-    loss_history = {}
+    for epoch in range(config["epochs"]):
+        loss = model.train_model(
+            dataloader, dataset, optimizer, scheduler, num_epochs=1
+        )  # Train for 1 epoch
 
-    for epoch in epochs_to_test:
-        for latent_dim in latent_dims_to_test:
-            for learning_rate in learning_rates_to_test:
-                # Create a unique file_name for this run's results
-                file_name = f"output/epochs_{epoch}_latent_{latent_dim}_lr_{learning_rate}.png"
+        # Report metrics to Ray Tune
+        train.report({"loss": loss[-1]})
 
-                # Initialize the VAE model
-                model = VAE(latent_dim=latent_dim).to(DEVICE)
 
-                # Define the optimizer (Adam for better convergence)
-                optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+if __name__ == "__main__":
+    # Define the search space for hyperparameters
+    search_space = {
+        "lr": tune.grid_search([1e-3, 1e-4, 1e-5]),
+        "latent_dim": tune.grid_search([64, 128, 256]),
+        "epochs": tune.grid_search([10, 50, 100]),
+    }
 
-                print("\n")
-                print("-" * 50)
-                print(" " * 15 + "Starting Training")
-                print(f" * Training on device: {DEVICE}")
-                print(f" * Number of samples in dataset: {len(dataset)}")
-                print(f" * Batch size: {BATCH_SIZE}")
-                print(f" * Number of epochs: {epoch}")
-                print(f" * Learning rate: {learning_rate}")
-                print(f" * Latent dimension: {latent_dim}")
-                print("-" * 50)
-                print("\n")
+    # Scheduler to stop bad trials early
+    scheduler = ASHAScheduler(
+        metric="loss",
+        mode="min",
+        max_t=100,
+        grace_period=1,
+        reduction_factor=2,
+    )
 
-                # Training loop
-                loss = model.train_model(dataloader, dataset, optimizer, num_epochs=epoch)
+    # Set up the Tuner
+    tuner = tune.Tuner(
+        train_vae,
+        tune_config=tune.TuneConfig(
+            scheduler=scheduler,
+            num_samples=1,  # Will run 27 trials due to grid search
+        ),
+        param_space=search_space,
+    )
 
-                # Save loss history to a dictonary
-                key = f"Epochs: {epoch}, Latent_dim: {latent_dim}, LR: {learning_rate}"
-                loss_history[key] = loss
+    # Run the hyperparameter tuning
+    results = tuner.fit()
 
-                # Plot some reconstructions
-                model.plot_reconstructions(
-                    dataloader, num_images=8, root_path="output", file_name=file_name
-                )
+    # Get the best result
+    best_result = results.get_best_result(metric="loss", mode="min")
+
+    print("\n" * 2)
+    print("-" * 50)
+    print(" " * 15 + "Best Hyperparameters")
+    print("-" * 50)
+    print(f" * Best trial config: {best_result.config}")
+    if best_result.metrics is not None and "loss" in best_result.metrics:
+        print(f" * Best trial final validation loss: {best_result.metrics['loss']}")
+    else:
+        print(" * Best trial final validation loss: Not available")
+
+    # You can now retrain the model with the best hyperparameters or load the best checkpoint
+    # For example:
+    # best_model = VAE(latent_dim=best_result.config["latent_dim"])
+    # best_checkpoint = torch.load(best_result.checkpoint.to_air_checkpoint().path + "/checkpoint.pt")
+    # best_model.load_state_dict(best_checkpoint["model_state"])
+    print("-" * 50)
+    print("\n")
