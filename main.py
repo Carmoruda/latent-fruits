@@ -11,8 +11,9 @@ from vae import VAE, VAEDataset
 from vae.model import BATCH_SIZE, DEVICE
 
 
-def train_vae(config):
+def train_vae(config, report=True):
     data_dir = Path(__file__).parent / "data"
+    output_dir = Path(__file__).parent / "output"
 
     # Create the dataset
     transform = transforms.Compose(
@@ -45,21 +46,27 @@ def train_vae(config):
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=5)
 
-    for _ in range(config["epochs"]):
-        train_loss, val_loss = model.train_model(
-            train_dataloader, val_dataloader, optimizer, scheduler, num_epochs=1
+    for current_epoch in range(config["epochs"]):
+        _, val_loss = model.train_model(
+            train_dataloader,
+            val_dataloader,
+            optimizer,
+            scheduler,
+            epoch=current_epoch,
+            num_epochs=config["epochs"],
         )  # Train for 1 epoch
 
         # Report metrics to Ray Tune
-        train.report({"loss": val_loss[-1]})
+        if report:
+            train.report({"loss": val_loss[-1]})
 
     model.plot_reconstructions(
         dataloader=DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False),
         root_path=str(data_dir),
-        file_name="reconstructions.png",
+        file_name=f"{output_dir}/reconstructions.png",
     )
 
-    return model, test_dataloader
+    return model, test_dataloader, train_dataloader
 
 
 def hyperparameter_tuning():
@@ -117,13 +124,18 @@ def hyperparameter_tuning():
 if __name__ == "__main__":
     # hyperparameter_tuning()
     data_dir = Path(__file__).parent / "data"
+    output_dir = Path(__file__).parent / "output"
 
-    model, test_dataloader = train_vae(
+    model, test_dataloader, train_dataloader = train_vae(
         {
             "lr": 1e-3,
             "latent_dim": 128,
             "epochs": 20,
-        }
+        },
+        False,
     )
 
-    model.generate_images(root_path=str(data_dir), file_name="generated.png")
+    # Fit the GMM model
+    model.fit_gmm(train_dataloader)
+
+    model.generate_images(root_path=str(data_dir), file_name=f"{output_dir}/generated.png")

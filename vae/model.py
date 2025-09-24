@@ -1,8 +1,10 @@
 import os
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.mixture import GaussianMixture
 from torch.utils.data import DataLoader
 
 DEVICE = None
@@ -31,14 +33,17 @@ class VAE(torch.nn.Module):
         torch (Module): PyTorch module.
     """
 
-    def __init__(self, latent_dim: int) -> None:
+    def __init__(self, latent_dim: int, n_components: int = 10) -> None:
         """Initialize the VAE model.
 
         Args:
             latent_dim (int): Dimension of the latent space.
+            n_components (int): Number of components for the Gaussian Mixture Model.
         """
 
         self.latent_dim = latent_dim
+        self.n_components = n_components
+        self.gmm = None
 
         super(VAE, self).__init__()
 
@@ -120,12 +125,33 @@ class VAE(torch.nn.Module):
 
         return reconstructed, mu, logvar
 
+    def fit_gmm(self, train_dataloader: DataLoader) -> None:
+        """Fit a Gaussian Mixture Model to the latent space of the training data.
+
+        Args:
+            train_dataloader (DataLoader): DataLoader for the training dataset.
+        """
+        self.eval()
+        latent_mus = []
+        with torch.no_grad():
+            for images in train_dataloader:
+                images = images.to(DEVICE)
+                _, mu, _ = self(images)
+                latent_mus.append(mu.cpu().numpy())
+
+        latent_mus = np.concatenate(latent_mus, axis=0)
+        self.gmm = GaussianMixture(n_components=self.n_components, reg_covar=1e-6)
+        print("Fitting GMM...")
+        self.gmm.fit(latent_mus)
+        print("GMM fitted.")
+
     def train_model(
         self,
         train_dataloader: DataLoader,
         val_dataloader: DataLoader,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+        epoch: int = 1,
         num_epochs: int = 10,
     ) -> tuple[list[float], list[float]]:
         """Train the VAE model.
@@ -134,7 +160,8 @@ class VAE(torch.nn.Module):
             val_dataloader (DataLoader): DataLoader for the validation dataset.
             optimizer (torch.optim.Optimizer): Optimizer for training.
             scheduler (torch.optim.lr_scheduler.ReduceLROnPlateau): Learning rate scheduler.
-            num_epochs (int, optional): Number of training epochs. Defaults to 10.
+            epoch (int, optional): Number of epoch in training.
+            num_epochs (int, optional): Total number of epochs for training. Defaults to 10.
         Returns:
             tuple[list[float], list[float]]: Histories of training and validation losses.
         """
@@ -142,62 +169,61 @@ class VAE(torch.nn.Module):
         train_loss_history = []
         val_loss_history = []
 
-        for epoch in range(num_epochs):
-            # --- Training Phase ---
-            self.train()
-            total_train_loss = 0
-            for images in train_dataloader:
+        # --- Training Phase ---
+        self.train()
+        total_train_loss = 0
+        for images in train_dataloader:
+            images = images.to(DEVICE)
+
+            # Forward pass
+            reconstructed_images, mu, logvar = self(images)
+
+            # Calculate loss
+            reconstruction_loss = F.binary_cross_entropy(
+                reconstructed_images, images, reduction="sum"
+            )
+            kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+            loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * 1e-3) / len(
+                images
+            )
+
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_train_loss += loss.item() / len(images)
+
+        avg_train_loss = total_train_loss / len(train_dataloader)
+        train_loss_history.append(avg_train_loss)
+
+        # --- Validation Phase ---
+        self.eval()
+        total_val_loss = 0
+        with torch.no_grad():
+            for images in val_dataloader:
                 images = images.to(DEVICE)
-
-                # Forward pass
                 reconstructed_images, mu, logvar = self(images)
-
-                # Calculate loss
                 reconstruction_loss = F.binary_cross_entropy(
                     reconstructed_images, images, reduction="sum"
                 )
                 kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * 1e-4) / len(
-                    images
-                )
+                val_loss = (reconstruction_loss / len(images)) + (
+                    kl_divergence_loss * 1e-4
+                ) / len(images)
+                total_val_loss += val_loss.item() / len(images)
 
-                # Backward pass and optimization
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        avg_val_loss = total_val_loss / len(val_dataloader)
+        val_loss_history.append(avg_val_loss)
 
-                total_train_loss += loss.item() / len(images)
+        print(
+            f"Epoch [{epoch + 1}/{num_epochs}], "
+            f"Train Loss: {avg_train_loss:.4f}, "
+            f"Val Loss: {avg_val_loss:.4f}"
+        )
 
-            avg_train_loss = total_train_loss / len(train_dataloader)
-            train_loss_history.append(avg_train_loss)
-
-            # --- Validation Phase ---
-            self.eval()
-            total_val_loss = 0
-            with torch.no_grad():
-                for images in val_dataloader:
-                    images = images.to(DEVICE)
-                    reconstructed_images, mu, logvar = self(images)
-                    reconstruction_loss = F.binary_cross_entropy(
-                        reconstructed_images, images, reduction="sum"
-                    )
-                    kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-                    val_loss = (reconstruction_loss / len(images)) + (
-                        kl_divergence_loss * 1e-4
-                    ) / len(images)
-                    total_val_loss += val_loss.item() / len(images)
-
-            avg_val_loss = total_val_loss / len(val_dataloader)
-            val_loss_history.append(avg_val_loss)
-
-            print(
-                f"Epoch [{epoch + 1}/{num_epochs}], "
-                f"Train Loss: {avg_train_loss:.4f}, "
-                f"Val Loss: {avg_val_loss:.4f}"
-            )
-
-            # Update the learning rate scheduler
-            scheduler.step(avg_val_loss)
+        # Update the learning rate scheduler
+        scheduler.step(avg_val_loss)
 
         return train_loss_history, val_loss_history
 
@@ -223,28 +249,27 @@ class VAE(torch.nn.Module):
 
         # Deactivate gradients for inference
         with torch.no_grad():
-            # Generate random latent vectors
-            z = torch.randn(num_images, self.latent_dim).to(DEVICE)
+            if self.gmm:
+                # Sample from the GMM
+                z, _ = self.gmm.sample(num_images)
+                z = torch.from_numpy(z).float().to(DEVICE)
+            else:
+                # Generate random latent vectors from a standard normal distribution
+                z = torch.randn(num_images, self.latent_dim).to(DEVICE)
 
             # Decode the latent vectors to generate images
             z_expanded = self.decoder_input(z)
             generated_images = self.decoder(z_expanded)
 
             # Plot the original and reconstructed images
-            _, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
+            _, axes = plt.subplots(1, num_images, figsize=(num_images * 2, 2))
 
             for i in range(num_images):
                 # Original images
-                ax = axes[0, i]
+                ax = axes[i]
                 ax.imshow(generated_images[i].cpu().squeeze(), cmap="gray")
                 ax.axis("off")
-                ax.set_title("Original")
-
-                # Reconstructed images
-                ax = axes[1, i]
-                ax.imshow(generated_images[i].cpu().squeeze(), cmap="gray")
-                ax.axis("off")
-                ax.set_title("Reconstructed")
+                ax.set_title(f"Generated {i + 1}")
 
             plt.tight_layout()
 
@@ -292,7 +317,13 @@ class VAE(torch.nn.Module):
                 ax = axes[0, i]
                 ax.imshow(images[i].cpu().squeeze(), cmap="gray")
                 ax.axis("off")
-                ax.set_title(f"Generated {i + 1}")
+                ax.set_title("Original")
+
+                # Reconstructed images
+                ax = axes[1, i]
+                ax.imshow(reconstructed_images[i].cpu().squeeze(), cmap="gray")
+                ax.axis("off")
+                ax.set_title("Reconstructed")
 
             plt.tight_layout()
 
