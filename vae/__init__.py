@@ -1,4 +1,4 @@
-from .dataset import VAEDataset
-from .model import VAE
+from .dataset import CVAEDataset
+from .model import CVAE
 
-__all__ = ["VAEDataset", "VAE"]
+__all__ = ["CVAEDataset", "CVAE"]

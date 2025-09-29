@@ -4,10 +4,10 @@ import torch
 from ray import train, tune
 from ray.tune.schedulers import ASHAScheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import ConcatDataset, DataLoader, random_split
 from torchvision import transforms
 
-from vae import VAE, VAEDataset
+from vae import CVAE, CVAEDataset
 from vae.model import BATCH_SIZE, DEVICE
 
 
@@ -22,12 +22,26 @@ def train_vae(config, report=True):
             transforms.ToTensor(),
         ]
     )
-    dataset = VAEDataset(
-        "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
-        data_dir,
-        download=False,
+
+    cat_dataset = CVAEDataset(
+        "https://www.kaggle.com/api/v1/datasets/download/soumikrakshit/anime-faces",
+        str(data_dir) + "/anime",
+        download=True,
         transform=transform,
+        label=0,
+        extracted_folder="data",
     )
+
+    cat_dataset = CVAEDataset(
+        "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
+        str(data_dir) + "/cats",
+        download=True,
+        transform=transform,
+        label=0,
+        extracted_folder="cats",
+    )
+
+    dataset = ConcatDataset([cat_dataset])
 
     # Split dataset into training and validation
     train_size = int(0.8 * len(dataset))
@@ -42,7 +56,7 @@ def train_vae(config, report=True):
     test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # Model, Optimizer
-    model = VAE(latent_dim=config["latent_dim"]).to(DEVICE)
+    model = CVAE(latent_dim=config["latent_dim"], n_classes=config["n_classes"]).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=5)
 
@@ -75,6 +89,7 @@ def hyperparameter_tuning():
         "lr": tune.grid_search([1e-3, 1e-4, 1e-5]),
         "latent_dim": tune.grid_search([64, 128, 256]),
         "epochs": tune.grid_search([10, 50, 100]),
+        "n_classes": 3,
     }
 
     # Scheduler to stop bad trials early
@@ -131,6 +146,7 @@ if __name__ == "__main__":
             "lr": 1e-3,
             "latent_dim": 128,
             "epochs": 20,
+            "n_classes": 1,
         },
         False,
     )
@@ -138,4 +154,6 @@ if __name__ == "__main__":
     # Fit the GMM model
     model.fit_gmm(train_dataloader)
 
-    model.generate_images(root_path=str(data_dir), file_name=f"{output_dir}/generated.png")
+    model.generate_images(
+        root_path=str(data_dir), labels=[0], file_name=f"{output_dir}/generated.png"
+    )

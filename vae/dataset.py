@@ -1,21 +1,31 @@
 import os
 import shutil
 import zipfile
+from typing import Optional
 
 import requests
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 
-class VAEDataset(Dataset):
+class CVAEDataset(Dataset):
     """Dataset of images for VAE.
 
     Args:
         Dataset (torch.utils.data.Dataset): PyTorch Dataset class.
     """
 
-    def __init__(self, url, dataset_path, download=True, transform=None) -> None:
+    def __init__(
+        self,
+        url: str,
+        dataset_path: str,
+        transform: Optional[transforms.Compose] = None,
+        label: int = 0,
+        extracted_folder: str = "default",
+        download: bool = False,
+    ) -> None:
         """Initialize the dataset. Assigns URL, dataset path, optional
         transformations, downloads the dataset and lists image files.
 
@@ -23,15 +33,19 @@ class VAEDataset(Dataset):
         Args:
             url (string): URL to the Kaggle dataset download.
             dataset_path (string): Directory for the dataset.
-            transform (callable, optional): Optional transform to be applied on a sample. Defaults to None.
+            transform (transforms.Compose, optional): Optional transform to be applied on a sample. Defaults to None.
+            label (int, optional): The label to assign to all images in the dataset. Defaults to 0.
+            extracted_folder (str, optional): The folder name inside the extracted zip where images are located. Defaults to "default".
+            download (bool, optional): Whether to download the dataset. Defaults to False.
         """
 
         self.url = url
         self.dataset_path = dataset_path
         self.transform = transform
+        self.label = label
 
         if download:
-            self.download()
+            self.download(extracted_folder)
 
         # List all image files in the dataset directory and store their names if they are images
         self.images = [
@@ -56,14 +70,14 @@ class VAEDataset(Dataset):
 
         return number
 
-    def __getitem__(self, index) -> Image.Image:
+    def __getitem__(self, index) -> tuple[Image.Image, int]:
         """Get a sample from the dataset.
 
         Args:
             index (int): Index of the sample to retrieve.
 
         Returns:
-            Image.Image: The requested image.
+            tuple[Image.Image, int]: The requested image and its label.
         """
         # Handle case where index is a tensor
         # (A tensor is a multi-dimensional array used in PyTorch for data representation)
@@ -84,10 +98,20 @@ class VAEDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        return image
+        # For CVAE, we return the image and its label
+        return image, self.label
 
-    def download(self) -> None:
-        """Download the dataset from the Kaggle URL and extract it."""
+    def download(self, extracted_folder: str) -> None:
+        """Download the dataset from the Kaggle URL and extract it.
+
+        Args:
+            extracted_folder (str): Path to the folder where the dataset will be extracted.
+
+        Raises:
+            RuntimeError: If the dataset cannot be downloaded or extracted.
+        """
+
+        print("Downloading and extracting dataset...")
 
         output_zip = "./dataset.zip"
         extract_to = "."
@@ -102,7 +126,7 @@ class VAEDataset(Dataset):
             zip_ref.extractall(extract_to)
 
         # Move dataset to ./data
-        extracted_root = os.path.join(extract_to, "cats")
+        extracted_root = os.path.join(extract_to, extracted_folder)
         data_dst = os.path.join(extract_to, self.dataset_path)
 
         # Search for the folder containing images inside 'extracted'
@@ -134,3 +158,5 @@ class VAEDataset(Dataset):
         # Delete the extracted folder and zip file to clean up
         shutil.rmtree(extracted_root)
         os.remove(output_zip)
+
+        print(f"Dataset downloaded and extracted to '{data_dst}'.")

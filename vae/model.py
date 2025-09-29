@@ -27,26 +27,28 @@ The batch size is the number of samples that will be propagated through the netw
 """
 
 
-class VAE(torch.nn.Module):
+class CVAE(torch.nn.Module):
     """Variational Autoencoder (VAE) model.
 
     Args:
         torch (Module): PyTorch module.
     """
 
-    def __init__(self, latent_dim: int, n_components: int = 10) -> None:
+    def __init__(self, latent_dim: int, n_classes: int = 1, n_components: int = 10) -> None:
         """Initialize the VAE model.
 
         Args:
             latent_dim (int): Dimension of the latent space.
-            n_components (int): Number of components for the Gaussian Mixture Model.
+            n_classes (int): Number of classes for the classification head. Defaults to 1.
+            n_components (int): Number of components for the Gaussian Mixture Model. Defaults to 10.
         """
 
         self.latent_dim = latent_dim
+        self.n_classes = n_classes
         self.n_components = n_components
         self.gmm = None
 
-        super(VAE, self).__init__()
+        super(CVAE, self).__init__()
 
         # Encoder: Convolutional layers that compress the image
         self.encoder = torch.nn.Sequential(
@@ -59,11 +61,11 @@ class VAE(torch.nn.Module):
         )
 
         # Layers for the mean and log-variance of the latent space
-        self.fc_mu = torch.nn.Linear(128 * 8 * 8, latent_dim)
-        self.fc_logvar = torch.nn.Linear(128 * 8 * 8, latent_dim)
+        self.fc_mu = torch.nn.Linear(128 * 8 * 8 + n_classes, latent_dim)
+        self.fc_logvar = torch.nn.Linear(128 * 8 * 8 + n_classes, latent_dim)
 
         # Decoder
-        self.decoder_input = torch.nn.Linear(latent_dim, 128 * 8 * 8)
+        self.decoder_input = torch.nn.Linear(latent_dim + n_classes, 128 * 8 * 8)
         self.decoder = torch.nn.Sequential(
             torch.nn.Unflatten(1, (128, 8, 8)),
             torch.nn.ConvTranspose2d(
@@ -100,28 +102,37 @@ class VAE(torch.nn.Module):
         # Sampled latent vector
         return mu + eps * std
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, y: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass through the VAE.
 
         Args:
             x (torch.Tensor): Input tensor.
+            y (torch.Tensor): One-hot encoded class labels.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Reconstructed image, mean, and log-variance.
         """
         # Encode the input
-        x = self.encoder(x)
+        x_encoded = self.encoder(x)
+
+        # Concatenate the class labels with the encoded input
+        x_combined = torch.cat([x_encoded, y], dim=1)
 
         # Get the mean and log-variance
-        mu = self.fc_mu(x)
-        logvar = self.fc_logvar(x)
+        mu = self.fc_mu(x_combined)
+        logvar = self.fc_logvar(x_combined)
 
         # Reparameterize to get the latent vector
         z = self.reparameterize(mu, logvar)
 
+        # Concatenate the class labels with the latent vector
+        z_combined = torch.cat([z, y], dim=1)
+
         # Decode the latent vector
         # (First expand it to match the decoder input size)
-        z_expanded = self.decoder_input(z)
+        z_expanded = self.decoder_input(z_combined)
         reconstructed = self.decoder(z_expanded)
 
         return reconstructed, mu, logvar
@@ -135,9 +146,10 @@ class VAE(torch.nn.Module):
         self.eval()
         latent_mus = []
         with torch.no_grad():
-            for images in train_dataloader:
+            for images, labels in train_dataloader:
                 images = images.to(DEVICE)
-                _, mu, _ = self(images)
+                y_onehot = F.one_hot(labels, num_classes=self.n_classes).float().to(DEVICE)
+                _, mu, _ = self(images, y_onehot)
                 latent_mus.append(mu.cpu().numpy())
 
         latent_mus = np.concatenate(latent_mus, axis=0)
@@ -182,11 +194,15 @@ class VAE(torch.nn.Module):
         # --- Training Phase ---
         self.train()
         total_train_loss = 0
-        for images in train_dataloader:
+        for images, labels in train_dataloader:
             images = images.to(DEVICE)
 
+            # One-hot encode the labels
+            # (Convert labels to matrix of size [batch_size, n_classes])
+            y_onehot = F.one_hot(labels, num_classes=self.n_classes).float().to(DEVICE)
+
             # Forward pass
-            reconstructed_images, mu, logvar = self(images)
+            reconstructed_images, mu, logvar = self(images, y_onehot)
 
             # Calculate loss
             reconstruction_loss = F.binary_cross_entropy(
@@ -211,9 +227,10 @@ class VAE(torch.nn.Module):
         self.eval()
         total_val_loss = 0
         with torch.no_grad():
-            for images in val_dataloader:
+            for images, labels in val_dataloader:
                 images = images.to(DEVICE)
-                reconstructed_images, mu, logvar = self(images)
+                y_onehot = F.one_hot(labels, num_classes=self.n_classes).float().to(DEVICE)
+                reconstructed_images, mu, logvar = self(images, y_onehot)
                 reconstruction_loss = F.binary_cross_entropy(
                     reconstructed_images, images, reduction="sum"
                 )
@@ -240,19 +257,21 @@ class VAE(torch.nn.Module):
     def generate_images(
         self,
         root_path: str,
-        num_images: int = 5,
+        labels: list[int],
         file_name: str = "default.png",
     ) -> torch.Tensor:
         """Generate new images by sampling from the latent space.
 
         Args:
-            num_images (int): Number of images to generate.
             root_path (str): Root path to save the generated images.
+            labels (list[int]): List of labels for the images to generate.
             file_name (str, optional): File name to save the generated images. Defaults to "default.png".
 
         Returns:
             torch.Tensor: Generated images.
         """
+
+        num_images = len(labels)
 
         # Set the model to evaluation mode
         self.eval()
@@ -267,12 +286,23 @@ class VAE(torch.nn.Module):
                 # Generate random latent vectors from a standard normal distribution
                 z = torch.randn(num_images, self.latent_dim).to(DEVICE)
 
+            # One-hot encode the labels
+            y_onehot = (
+                F.one_hot(torch.tensor(labels), num_classes=self.n_classes).float().to(DEVICE)
+            )
+
+            # Concatenate the class labels with the latent vector
+            z_combined = torch.cat([z, y_onehot], dim=1)
+
             # Decode the latent vectors to generate images
-            z_expanded = self.decoder_input(z)
+            z_expanded = self.decoder_input(z_combined)
             generated_images = self.decoder(z_expanded)
 
             # Plot the original and reconstructed images
             _, axes = plt.subplots(1, num_images, figsize=(num_images * 2, 2))
+
+            if num_images == 1:
+                axes = [axes]
 
             for i in range(num_images):
                 # Original images
@@ -313,11 +343,16 @@ class VAE(torch.nn.Module):
 
         with torch.no_grad():
             # Get a batch of images from the dataloader
-            images = next(iter(dataloader)).to(DEVICE)
+            images, labels = next(iter(dataloader))
+            images = images.to(DEVICE)
             images = images[:num_images]
+            labels = labels[:num_images]
+
+            # One-hot encode the labels
+            y_onehot = F.one_hot(labels, num_classes=self.n_classes).float().to(DEVICE)
 
             # Reconstruct the images using the VAE
-            reconstructed_images, _, _ = self(images)
+            reconstructed_images, _, _ = self(images, y_onehot)
 
             # Plot the original and reconstructed images
             _, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
