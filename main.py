@@ -147,7 +147,7 @@ if __name__ == "__main__":
         {
             "lr": 1e-3,
             "latent_dim": 128,
-            "epochs": 20,
+            "epochs": 10,
             "n_classes": 2,
         },
         False,
@@ -157,5 +157,10 @@ if __name__ == "__main__":
     model.fit_gmm(train_dataloader)
 
     model.generate_images(
-        root_path=str(data_dir), labels=[0, 1], file_name=f"{output_dir}/generated.png"
+        root_path=str(data_dir), labels=[0, 1, 1, 0], file_name=f"{output_dir}/generated.png"
     )
+
+    model_save_path = output_dir / "trained_model.pth"
+
+    torch.save(model.state_dict(), model_save_path)
+    print(f"Model Saved: {model_save_path}")

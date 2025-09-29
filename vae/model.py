@@ -1,5 +1,6 @@
 import os
 import warnings
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -46,38 +47,47 @@ class CVAE(torch.nn.Module):
         self.latent_dim = latent_dim
         self.n_classes = n_classes
         self.n_components = n_components
-        self.gmm = None
+        self.gmm: dict[int, GaussianMixture] = {}
 
         super(CVAE, self).__init__()
 
         # Encoder: Convolutional layers that compress the image
         self.encoder = torch.nn.Sequential(
-            torch.nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=1),
+            torch.nn.Conv2d(1, 32, kernel_size=4, stride=1, padding=1),
             torch.nn.ReLU(),
-            torch.nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            torch.nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             torch.nn.ReLU(),
-            torch.nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            torch.nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            torch.nn.ReLU(),
             torch.nn.Flatten(),
         )
 
+        encoder_flattened_dim = 256 * 7 * 7
+
         # Layers for the mean and log-variance of the latent space
-        self.fc_mu = torch.nn.Linear(128 * 8 * 8 + n_classes, latent_dim)
-        self.fc_logvar = torch.nn.Linear(128 * 8 * 8 + n_classes, latent_dim)
+        self.fc_mu = torch.nn.Linear(encoder_flattened_dim + n_classes, latent_dim)
+        self.fc_logvar = torch.nn.Linear(encoder_flattened_dim + n_classes, latent_dim)
 
         # Decoder
-        self.decoder_input = torch.nn.Linear(latent_dim + n_classes, 128 * 8 * 8)
+        self.decoder_input = torch.nn.Linear(latent_dim + n_classes, encoder_flattened_dim)
         self.decoder = torch.nn.Sequential(
-            torch.nn.Unflatten(1, (128, 8, 8)),
+            torch.nn.Unflatten(1, (256, 7, 7)),
             torch.nn.ConvTranspose2d(
-                128, 64, kernel_size=3, stride=2, padding=1, output_padding=1
+                256, 128, kernel_size=4, stride=2, padding=1, output_padding=1
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                64, 32, kernel_size=3, stride=2, padding=1, output_padding=1
+                128, 64, kernel_size=4, stride=2, padding=1, output_padding=1
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                32, 1, kernel_size=3, stride=2, padding=1, output_padding=1
+                64, 32, kernel_size=4, stride=2, padding=1, output_padding=1
+            ),
+            torch.nn.ReLU(),
+            torch.nn.ConvTranspose2d(
+                32, 1, kernel_size=4, stride=1, padding=1, output_padding=0
             ),
             torch.nn.Sigmoid(),  # Output values between [0, 1]
         )
@@ -143,29 +153,78 @@ class CVAE(torch.nn.Module):
         Args:
             train_dataloader (DataLoader): DataLoader for the training dataset.
         """
+        # Evaluate the model to get latent representations
         self.eval()
-        latent_mus = []
+
+        # Collect latent vectors by class
+        latent_by_label: dict[int, list[np.ndarray]] = defaultdict(list)
+
+        # Disable gradient computation
         with torch.no_grad():
+            # Iterate over the training data to collect latent vectors
             for images, labels in train_dataloader:
+                # Put images and labels on the correct device
                 images = images.to(DEVICE)
+
+                # One-hot encode the labels
                 y_onehot = F.one_hot(labels, num_classes=self.n_classes).float().to(DEVICE)
+
+                # Get the latent vectors (mu)
                 _, mu, _ = self(images, y_onehot)
-                latent_mus.append(mu.cpu().numpy())
 
-        latent_mus = np.concatenate(latent_mus, axis=0)
+                # Convert to numpy for GMM fitting
+                mu_np = mu.cpu().numpy()
 
-        self.gmm = GaussianMixture(n_components=self.n_components, reg_covar=1e-6)
-        print("Fitting GMM...")
+                # Get the labels
+                labels_np = labels.cpu().numpy()
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="covariance is not symmetric positive-semidefinite.",
-                category=RuntimeWarning,
+                # Group latent vectors by their labels
+                for class_idx in range(self.n_classes):
+                    # Create a mask for the current class
+                    class_mask = labels_np == class_idx
+
+                    # Append the latent vectors for the current class
+                    if np.any(class_mask):
+                        latent_by_label[class_idx].append(mu_np[class_mask])
+
+        # Fit a GMM for each class
+        self.gmm = {}
+
+        # Fit a GMM for each class
+        print("Fitting class-conditional GMMs...")
+        for class_idx in range(self.n_classes):
+            class_latents = latent_by_label.get(class_idx, [])
+            if not class_latents:
+                warnings.warn(
+                    f"No latent samples collected for class {class_idx}; falling back to standard normal sampling.",
+                    RuntimeWarning,
+                )
+                continue
+
+            samples = np.concatenate(class_latents, axis=0)
+            class_gmm = GaussianMixture(
+                n_components=self.n_components,
+                reg_covar=1e-6,
             )
 
-        self.gmm.fit(latent_mus)
-        print("GMM fitted.")
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="covariance is not symmetric positive-semidefinite.",
+                    category=RuntimeWarning,
+                )
+                class_gmm.fit(samples)
+
+            self.gmm[class_idx] = class_gmm
+            print(f"  · Fitted GMM for class {class_idx} with {samples.shape[0]} samples.")
+
+        if not self.gmm:
+            warnings.warn(
+                "No class GMMs were fitted successfully; generation will use standard normal sampling.",
+                RuntimeWarning,
+            )
+        else:
+            print("GMMs fitted.")
 
     def train_model(
         self,
@@ -278,10 +337,28 @@ class CVAE(torch.nn.Module):
 
         # Deactivate gradients for inference
         with torch.no_grad():
+            samples = []
+
+            # Sample from the GMM if available,
+            # otherwise sample from standard normal
             if self.gmm:
-                # Sample from the GMM
-                z, _ = self.gmm.sample(num_images)
-                z = torch.from_numpy(z).float().to(DEVICE)
+                # Sample from the GMM for each label
+                for label in labels:
+                    # Ensure label is an integer
+                    label_idx = int(label)
+                    # Get the GMM for the current class
+                    class_gmm = self.gmm.get(label_idx)
+
+                    # If no GMM was fitted for this class, fall back to standard normal
+                    if class_gmm is None:
+                        samples.append(torch.randn(1, self.latent_dim))
+                        continue
+
+                    # Sample a latent vector from the class-specific GMM
+                    sample, _ = class_gmm.sample(1)
+                    samples.append(torch.from_numpy(sample).float())
+
+                z = torch.cat(samples, dim=0).to(DEVICE)
             else:
                 # Generate random latent vectors from a standard normal distribution
                 z = torch.randn(num_images, self.latent_dim).to(DEVICE)
