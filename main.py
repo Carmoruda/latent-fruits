@@ -23,25 +23,27 @@ def train_vae(config, report=True):
         ]
     )
 
-    cat_dataset = CVAEDataset(
+    anime_dataset = CVAEDataset(
         "https://www.kaggle.com/api/v1/datasets/download/soumikrakshit/anime-faces",
         str(data_dir) + "/anime",
-        download=True,
+        download=False,
         transform=transform,
-        label=0,
+        label=1,
         extracted_folder="data",
+        delete_extracted=False,
     )
 
     cat_dataset = CVAEDataset(
         "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
         str(data_dir) + "/cats",
-        download=True,
+        download=False,
         transform=transform,
         label=0,
         extracted_folder="cats",
+        delete_extracted=True,
     )
 
-    dataset = ConcatDataset([cat_dataset])
+    dataset = ConcatDataset([cat_dataset, anime_dataset])
 
     # Split dataset into training and validation
     train_size = int(0.8 * len(dataset))
@@ -146,7 +148,7 @@ if __name__ == "__main__":
             "lr": 1e-3,
             "latent_dim": 128,
             "epochs": 20,
-            "n_classes": 1,
+            "n_classes": 2,
         },
         False,
     )
@@ -155,5 +157,5 @@ if __name__ == "__main__":
     model.fit_gmm(train_dataloader)
 
     model.generate_images(
-        root_path=str(data_dir), labels=[0], file_name=f"{output_dir}/generated.png"
+        root_path=str(data_dir), labels=[0, 1], file_name=f"{output_dir}/generated.png"
     )

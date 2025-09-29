@@ -25,6 +25,7 @@ class CVAEDataset(Dataset):
         label: int = 0,
         extracted_folder: str = "default",
         download: bool = False,
+        delete_extracted: bool = True,
     ) -> None:
         """Initialize the dataset. Assigns URL, dataset path, optional
         transformations, downloads the dataset and lists image files.
@@ -37,6 +38,7 @@ class CVAEDataset(Dataset):
             label (int, optional): The label to assign to all images in the dataset. Defaults to 0.
             extracted_folder (str, optional): The folder name inside the extracted zip where images are located. Defaults to "default".
             download (bool, optional): Whether to download the dataset. Defaults to False.
+            delete_extracted (bool, optional): Whether to delete the extracted folder after moving images. Defaults to True.
         """
 
         self.url = url
@@ -45,7 +47,7 @@ class CVAEDataset(Dataset):
         self.label = label
 
         if download:
-            self.download(extracted_folder)
+            self.download(extracted_folder, delete_extracted)
 
         # List all image files in the dataset directory and store their names if they are images
         self.images = [
@@ -101,11 +103,12 @@ class CVAEDataset(Dataset):
         # For CVAE, we return the image and its label
         return image, self.label
 
-    def download(self, extracted_folder: str) -> None:
+    def download(self, extracted_folder: str, delete_extracted: bool = True) -> None:
         """Download the dataset from the Kaggle URL and extract it.
 
         Args:
             extracted_folder (str): Path to the folder where the dataset will be extracted.
+            delete_extracted (bool, optional): Whether to delete the extracted folder after moving images. Defaults to True.
 
         Raises:
             RuntimeError: If the dataset cannot be downloaded or extracted.
@@ -156,7 +159,8 @@ class CVAEDataset(Dataset):
                 shutil.move(src_file, dst_file)
 
         # Delete the extracted folder and zip file to clean up
-        shutil.rmtree(extracted_root)
-        os.remove(output_zip)
+        if delete_extracted:
+            shutil.rmtree(extracted_root)
+            os.remove(output_zip)
 
         print(f"Dataset downloaded and extracted to '{data_dst}'.")
