@@ -204,6 +204,7 @@ class CVAE(torch.nn.Module):
             samples = np.concatenate(class_latents, axis=0)
             class_gmm = GaussianMixture(
                 n_components=self.n_components,
+                covariance_type="diag",
                 reg_covar=1e-6,
             )
 
