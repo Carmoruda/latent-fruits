@@ -91,7 +91,7 @@ def hyperparameter_tuning():
         "lr": tune.grid_search([1e-3, 1e-4, 1e-5]),
         "latent_dim": tune.grid_search([64, 128, 256]),
         "epochs": tune.grid_search([10, 50, 100]),
-        "n_classes": 3,
+        "n_classes": 2,
     }
 
     # Scheduler to stop bad trials early
@@ -140,14 +140,15 @@ def hyperparameter_tuning():
 
 if __name__ == "__main__":
     # hyperparameter_tuning()
+
     data_dir = Path(__file__).parent / "data"
     output_dir = Path(__file__).parent / "output"
 
     model, test_dataloader, train_dataloader = train_vae(
         {
             "lr": 1e-3,
-            "latent_dim": 128,
-            "epochs": 10,
+            "latent_dim": 256,
+            "epochs": 30,
             "n_classes": 2,
         },
         False,
