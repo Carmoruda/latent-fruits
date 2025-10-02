@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from ray import train, tune
 from ray.tune.schedulers import ASHAScheduler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -14,6 +15,7 @@ from vae.model import BATCH_SIZE, DEVICE
 def train_vae(config, report=True):
     data_dir = Path(__file__).parent / "data"
     output_dir = Path(__file__).parent / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create the dataset
     transform = transforms.Compose(
@@ -60,10 +62,12 @@ def train_vae(config, report=True):
     # Model, Optimizer
     model = CVAE(latent_dim=config["latent_dim"], n_classes=config["n_classes"]).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=5)
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=2)
+    loss_function = config.get("loss_function", F.mse_loss)
 
     for current_epoch in range(config["epochs"]):
         _, val_loss = model.train_model(
+            loss_function,
             train_dataloader,
             val_dataloader,
             optimizer,
@@ -74,13 +78,19 @@ def train_vae(config, report=True):
 
         # Report metrics to Ray Tune
         if report:
-            train.report({"loss": val_loss[-1]})
+            metrics = {"loss": val_loss[-1]}
+            if model.current_lr is not None:
+                metrics["lr"] = model.current_lr
+            train.report(metrics)
 
     model.plot_reconstructions(
         dataloader=DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False),
         root_path=str(data_dir),
         file_name=f"{output_dir}/reconstructions.png",
     )
+
+    if model.lr_history:
+        model.plot_learning_rate(file_name=f"{output_dir}/lr_schedule.png")
 
     return model, test_dataloader, train_dataloader
 
@@ -89,9 +99,10 @@ def hyperparameter_tuning():
     # Define the search space for hyperparameters
     search_space = {
         "lr": tune.grid_search([1e-3, 1e-4, 1e-5]),
-        "latent_dim": tune.grid_search([64, 128, 256]),
-        "epochs": tune.grid_search([10, 50, 100]),
+        "latent_dim": tune.grid_search([32, 64, 128]),
+        "epochs": tune.grid_search([10, 20]),
         "n_classes": 2,
+        "loss_function": tune.grid_search([F.mse_loss, F.cross_entropy]),
     }
 
     # Scheduler to stop bad trials early
@@ -147,9 +158,10 @@ if __name__ == "__main__":
     model, test_dataloader, train_dataloader = train_vae(
         {
             "lr": 1e-3,
-            "latent_dim": 256,
-            "epochs": 30,
+            "latent_dim": 128,
+            "epochs": 7,
             "n_classes": 2,
+            "loss_function": F.mse_loss,
         },
         False,
     )

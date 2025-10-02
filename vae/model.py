@@ -1,6 +1,7 @@
 import os
 import warnings
 from collections import defaultdict
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -48,23 +49,25 @@ class CVAE(torch.nn.Module):
         self.n_classes = n_classes
         self.n_components = n_components
         self.gmm: dict[int, GaussianMixture] = {}
+        self.lr_history: list[float] = []
+        self.current_lr: Optional[float] = None
 
         super(CVAE, self).__init__()
 
         # Encoder: Convolutional layers that compress the image
         self.encoder = torch.nn.Sequential(
-            torch.nn.Conv2d(1, 32, kernel_size=4, stride=1, padding=1),
+            torch.nn.Conv2d(1, 32, kernel_size=7, stride=1, padding=1),
             torch.nn.ReLU(),
-            torch.nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
+            torch.nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=1),
             torch.nn.ReLU(),
-            torch.nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            torch.nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             torch.nn.ReLU(),
-            torch.nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            torch.nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             torch.nn.ReLU(),
             torch.nn.Flatten(),
         )
 
-        encoder_flattened_dim = 256 * 7 * 7
+        encoder_flattened_dim = 256 * 8 * 8
 
         # Layers for the mean and log-variance of the latent space
         self.fc_mu = torch.nn.Linear(encoder_flattened_dim + n_classes, latent_dim)
@@ -73,21 +76,21 @@ class CVAE(torch.nn.Module):
         # Decoder
         self.decoder_input = torch.nn.Linear(latent_dim + n_classes, encoder_flattened_dim)
         self.decoder = torch.nn.Sequential(
-            torch.nn.Unflatten(1, (256, 7, 7)),
+            torch.nn.Unflatten(1, (256, 8, 8)),
             torch.nn.ConvTranspose2d(
-                256, 128, kernel_size=4, stride=2, padding=1, output_padding=1
+                256, 128, kernel_size=3, stride=2, padding=1, output_padding=0
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                128, 64, kernel_size=4, stride=2, padding=1, output_padding=1
+                128, 64, kernel_size=3, stride=2, padding=1, output_padding=0
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                64, 32, kernel_size=4, stride=2, padding=1, output_padding=1
+                64, 32, kernel_size=5, stride=2, padding=1, output_padding=1
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                32, 1, kernel_size=4, stride=1, padding=1, output_padding=0
+                32, 1, kernel_size=7, stride=1, padding=1, output_padding=0
             ),
             torch.nn.Sigmoid(),  # Output values between [0, 1]
         )
@@ -229,6 +232,7 @@ class CVAE(torch.nn.Module):
 
     def train_model(
         self,
+        loss_function,
         train_dataloader: DataLoader,
         val_dataloader: DataLoader,
         optimizer: torch.optim.Optimizer,
@@ -244,12 +248,20 @@ class CVAE(torch.nn.Module):
             scheduler (torch.optim.lr_scheduler.ReduceLROnPlateau): Learning rate scheduler.
             epoch (int, optional): Number of epoch in training.
             num_epochs (int, optional): Total number of epochs for training. Defaults to 10.
+            loss_function (object, optional): Loss function to use. Defaults to F.mse_loss.
         Returns:
             tuple[list[float], list[float]]: Histories of training and validation losses.
         """
 
         train_loss_history = []
         val_loss_history = []
+
+        if epoch == 0 and self.lr_history:
+            # Reset between independent training sessions
+            self.lr_history.clear()
+
+        if loss_function is None:
+            loss_function = F.mse_loss
 
         # --- Training Phase ---
         self.train()
@@ -265,9 +277,8 @@ class CVAE(torch.nn.Module):
             reconstructed_images, mu, logvar = self(images, y_onehot)
 
             # Calculate loss
-            reconstruction_loss = F.binary_cross_entropy(
-                reconstructed_images, images, reduction="sum"
-            )
+            reconstruction_loss = loss_function(reconstructed_images, images, reduction="sum")
+
             kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
             loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * 1e-3) / len(
                 images
@@ -291,13 +302,14 @@ class CVAE(torch.nn.Module):
                 images = images.to(DEVICE)
                 y_onehot = F.one_hot(labels, num_classes=self.n_classes).float().to(DEVICE)
                 reconstructed_images, mu, logvar = self(images, y_onehot)
-                reconstruction_loss = F.binary_cross_entropy(
+                reconstruction_loss = loss_function(
                     reconstructed_images, images, reduction="sum"
                 )
                 kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                 val_loss = (reconstruction_loss / len(images)) + (
                     kl_divergence_loss * 1e-4
                 ) / len(images)
+
                 total_val_loss += val_loss.item() / len(images)
 
         avg_val_loss = total_val_loss / len(val_dataloader)
@@ -311,6 +323,10 @@ class CVAE(torch.nn.Module):
 
         # Update the learning rate scheduler
         scheduler.step(avg_val_loss)
+
+        current_lr = optimizer.param_groups[0]["lr"]
+        self.lr_history.append(current_lr)
+        self.current_lr = current_lr
 
         return train_loss_history, val_loss_history
 
@@ -456,3 +472,26 @@ class CVAE(torch.nn.Module):
             # Save the reconstructed images
             plt.savefig(file_name)
             plt.close()
+
+    def plot_learning_rate(self, file_name: str = "lr_schedule.png") -> None:
+        """Plot and save the learning rate schedule observed during training."""
+
+        if not self.lr_history:
+            warnings.warn("Learning rate history is empty; skipping LR plot.", RuntimeWarning)
+            return
+
+        directory = os.path.dirname(file_name)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        epochs = range(1, len(self.lr_history) + 1)
+
+        plt.figure(figsize=(6, 4))
+        plt.plot(epochs, self.lr_history, marker="o")
+        plt.title("Learning Rate Schedule")
+        plt.xlabel("Epoch")
+        plt.ylabel("Learning Rate")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(file_name)
+        plt.close()
