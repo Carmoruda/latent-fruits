@@ -28,6 +28,9 @@ Batch size for training.
 The batch size is the number of samples that will be propagated through the network at once.
 """
 
+BETA = 1e-2
+"""Beta parameter for the KL divergence loss."""
+
 
 class CVAE(torch.nn.Module):
     """Variational Autoencoder (VAE) model.
