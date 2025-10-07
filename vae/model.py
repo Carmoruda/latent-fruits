@@ -1,7 +1,8 @@
 import os
 import warnings
 from collections import defaultdict
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,7 +29,7 @@ Batch size for training.
 The batch size is the number of samples that will be propagated through the network at once.
 """
 
-BETA = 1e-2
+BETA = 1e-3
 """Beta parameter for the KL divergence loss."""
 
 
@@ -70,7 +71,7 @@ class CVAE(torch.nn.Module):
             torch.nn.Flatten(),
         )
 
-        encoder_flattened_dim = 256 * 8 * 8
+        encoder_flattened_dim = 256 * 12 * 12
 
         # Layers for the mean and log-variance of the latent space
         self.fc_mu = torch.nn.Linear(encoder_flattened_dim + n_classes, latent_dim)
@@ -79,21 +80,21 @@ class CVAE(torch.nn.Module):
         # Decoder
         self.decoder_input = torch.nn.Linear(latent_dim + n_classes, encoder_flattened_dim)
         self.decoder = torch.nn.Sequential(
-            torch.nn.Unflatten(1, (256, 8, 8)),
+            torch.nn.Unflatten(1, (256, 12, 12)),
             torch.nn.ConvTranspose2d(
-                256, 128, kernel_size=3, stride=2, padding=1, output_padding=0
+                256, 128, kernel_size=4, stride=2, padding=1, output_padding=0
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                128, 64, kernel_size=3, stride=2, padding=1, output_padding=0
+                128, 64, kernel_size=4, stride=2, padding=1, output_padding=0
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                64, 32, kernel_size=5, stride=2, padding=1, output_padding=1
+                64, 32, kernel_size=4, stride=2, padding=1, output_padding=0
             ),
             torch.nn.ReLU(),
             torch.nn.ConvTranspose2d(
-                32, 1, kernel_size=7, stride=1, padding=1, output_padding=0
+                32, 1, kernel_size=9, stride=1, padding=2, output_padding=0
             ),
             torch.nn.Sigmoid(),  # Output values between [0, 1]
         )
@@ -283,7 +284,7 @@ class CVAE(torch.nn.Module):
             reconstruction_loss = loss_function(reconstructed_images, images, reduction="sum")
 
             kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-            loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * 1e-3) / len(
+            loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * BETA) / len(
                 images
             )
 
@@ -310,7 +311,7 @@ class CVAE(torch.nn.Module):
                 )
                 kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                 val_loss = (reconstruction_loss / len(images)) + (
-                    kl_divergence_loss * 1e-4
+                    kl_divergence_loss * BETA
                 ) / len(images)
 
                 total_val_loss += val_loss.item() / len(images)
@@ -498,3 +499,45 @@ class CVAE(torch.nn.Module):
         plt.tight_layout()
         plt.savefig(file_name)
         plt.close()
+
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: Union[str, Path],
+        latent_dim: int,
+        n_classes: int,
+        *,
+        n_components: int = 10,
+        device: torch.device = DEVICE,
+        map_location: Optional[Union[torch.device, str]] = None,
+    ) -> "CVAE":
+        """Instantiate a CVAE and load the weights stored in ``checkpoint_path``.
+
+        Args:
+            checkpoint_path: Location of the ``.pth`` file produced with ``torch.save``.
+            latent_dim: Latent dimensionality used when the model was trained.
+            n_classes: Number of classes the model was conditioned on during training.
+            n_components: Number of components for the class-conditional GMM. Defaults to 10.
+            device: Device where the model should be placed after loading.
+            map_location: Optional override for ``torch.load``'s ``map_location``.
+
+        Raises:
+            FileNotFoundError: If ``checkpoint_path`` does not exist.
+
+        Returns:
+            CVAE: Model with the restored parameters, ready for inference.
+        """
+
+        checkpoint_path = Path(checkpoint_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        if map_location is None:
+            map_location = device
+
+        state_dict = torch.load(checkpoint_path, map_location=map_location)
+        model = cls(latent_dim=latent_dim, n_classes=n_classes, n_components=n_components)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        return model
