@@ -19,19 +19,10 @@ def train_vae(config, report=True):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create the dataset
-    image_size = 100
     transform = transforms.Compose(
         [
-            # Convertir RGBA a RGB primero si es necesario
-            transforms.Lambda(lambda img: img.convert("RGB") if img.mode == "RGBA" else img),
-            # Redimensionar a tamaño fijo
-            transforms.Resize(
-                (image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC
-            ),
-            # Convertir a escala de grises
             transforms.Grayscale(num_output_channels=1),
             transforms.ToTensor(),
-            # Las imágenes estarán en [0, 1]
         ]
     )
 

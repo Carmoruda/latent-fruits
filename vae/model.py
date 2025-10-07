@@ -96,7 +96,8 @@ class CVAE(torch.nn.Module):
             torch.nn.ConvTranspose2d(
                 32, 1, kernel_size=9, stride=1, padding=2, output_padding=0
             ),
-            torch.nn.Sigmoid(),  # Output values between [0, 1]
+            # Sigmoid keeps pixel intensities inside [0, 1] so they match the dataset after ToTensor().
+            torch.nn.Sigmoid(),
         )
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
