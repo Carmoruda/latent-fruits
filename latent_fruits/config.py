@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -59,16 +59,57 @@ class ProjectConfig:
         # If there are valid overrides, build a dict of converted values
         # for fields that need conversion
         converted: Dict[str, Any] = {}
+        field_types: Dict[str, Any] = get_type_hints(ProjectConfig)
 
         for key, value in valid_overrides.items():
-            # If the field is a Path, convert the string to a Path
-            if key in {"data_dir", "output_dir"} and value is not None:
-                converted[key] = Path(value)
-            else:
-                converted[key] = value
+            target_type = field_types.get(key)
+            converted[key] = self._coerce_value(key, value, target_type)
 
         # Return a new instance with the updated fields
         return replace(self, **converted)
+
+    @staticmethod
+    def _coerce_value(field_name: str, value: Any, target_type: Any) -> Any:
+        """Convert the override value to match the field type if needed."""
+
+        if target_type is None or target_type is Any:
+            return value
+
+        origin = get_origin(target_type)
+
+        if origin is Union:
+            valid_args = [arg for arg in get_args(target_type) if arg is not type(None)]
+            if len(valid_args) == 1:
+                return ProjectConfig._coerce_value(field_name, value, valid_args[0])
+
+        try:
+            if target_type is Path:
+                return value if isinstance(value, Path) else Path(value)
+
+            if target_type is int:
+                return value if isinstance(value, int) else int(value)
+
+            if target_type is float:
+                return value if isinstance(value, float) else float(value)
+
+            if target_type is bool:
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    lowered = value.strip().lower()
+                    if lowered in {"true", "1", "yes", "y", "on"}:
+                        return True
+                    if lowered in {"false", "0", "no", "n", "off"}:
+                        return False
+                return bool(value)
+
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid value for '{field_name}': expected {target_type}, got {value!r}"
+            ) from exc
+
+        # If none of the above conversions applied, return the value as-is
+        return value
 
     def ensure_directories(self) -> None:
         """
