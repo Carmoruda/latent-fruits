@@ -78,7 +78,9 @@ def train_vae(config, report=True):
     test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # Model, Optimizer
-    model = CVAE(latent_dim=config["latent_dim"], n_classes=config["n_classes"]).to(DEVICE)
+    model = CVAE(
+        latent_dim=config["latent_dim"], n_classes=config["n_classes"], beta=config["beta"]
+    ).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=2)
     loss_function = config.get("loss_function", F.mse_loss)
@@ -234,6 +236,7 @@ if __name__ == "__main__":
             "epochs": config.epochs,
             "n_classes": config.n_classes,
             "loss_function": F.mse_loss,
+            "beta": config.beta,
         },
         False,
     )

@@ -29,9 +29,6 @@ Batch size for training.
 The batch size is the number of samples that will be propagated through the network at once.
 """
 
-BETA = 1e-3
-"""Beta parameter for the KL divergence loss."""
-
 
 class CVAE(torch.nn.Module):
     """Variational Autoencoder (VAE) model.
@@ -40,13 +37,14 @@ class CVAE(torch.nn.Module):
         torch (Module): PyTorch module.
     """
 
-    def __init__(self, latent_dim: int, n_classes: int = 1, n_components: int = 10) -> None:
+    def __init__(self, latent_dim: int, n_classes: int = 1, n_components: int = 10, beta: float = 1e-3) -> None:
         """Initialize the VAE model.
 
         Args:
             latent_dim (int): Dimension of the latent space.
             n_classes (int): Number of classes for the classification head. Defaults to 1.
             n_components (int): Number of components for the Gaussian Mixture Model. Defaults to 10.
+            beta (float): Weight for the KL divergence term in the loss function. Defaults to 1e-3.
         """
 
         self.latent_dim = latent_dim
@@ -55,6 +53,7 @@ class CVAE(torch.nn.Module):
         self.gmm: dict[int, GaussianMixture] = {}
         self.lr_history: list[float] = []
         self.current_lr: Optional[float] = None
+        self.beta = beta
 
         super(CVAE, self).__init__()
 
@@ -285,7 +284,7 @@ class CVAE(torch.nn.Module):
             reconstruction_loss = loss_function(reconstructed_images, images, reduction="sum")
 
             kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-            loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * BETA) / len(
+            loss = (reconstruction_loss / len(images)) + (kl_divergence_loss * self.beta) / len(
                 images
             )
 
@@ -312,7 +311,7 @@ class CVAE(torch.nn.Module):
                 )
                 kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                 val_loss = (reconstruction_loss / len(images)) + (
-                    kl_divergence_loss * BETA
+                    kl_divergence_loss * self.beta
                 ) / len(images)
 
                 total_val_loss += val_loss.item() / len(images)
@@ -378,7 +377,8 @@ class CVAE(torch.nn.Module):
 
                     # Sample a latent vector from the class-specific GMM
                     sample, _ = class_gmm.sample(1)
-                    samples.append(torch.from_numpy(sample).float())
+                    tensor_sample = torch.from_numpy(sample).to(device=DEVICE, dtype=torch.float32)
+                    samples.append(tensor_sample)
 
                 z = torch.cat(samples, dim=0).to(DEVICE)
             else:
