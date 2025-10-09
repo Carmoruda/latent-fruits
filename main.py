@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, random_split
 from torchvision import transforms
 
+from latent_fruits import load_config, seed_everything
 from vae import CVAE, CVAEDataset
 from vae.model import BATCH_SIZE, DEVICE
 
@@ -215,21 +216,32 @@ def hyperparameter_tuning():
 
 
 if __name__ == "__main__":
-    # hyperparameter_tuning()
-    data_dir = Path(__file__).parent / "data"
-    output_dir = Path(__file__).parent / "output"
-    model, test_dataloader, train_dataloader = train_vae(
+    config_dir = Path(__file__).parent / "configs/local.yaml"
+    config = load_config(config_dir)
+
+    # Adjust paths to be absolute
+    data_dir = Path(__file__).parent / config.data_dir
+    output_dir = Path(__file__).parent / config.output_dir
+    config = config.with_updates(data_dir=data_dir, output_dir=output_dir)
+
+    config.ensure_directories()
+    seed_everything(config.seed)
+
+    model, test_loader, train_loader = train_vae(
         {
-            "lr": 1e-3,
-            "latent_dim": 128,
-            "epochs": 20,
-            "n_classes": 2,
+            "lr": config.learning_rate,
+            "latent_dim": config.latent_dim,
+            "epochs": config.epochs,
+            "n_classes": config.n_classes,
             "loss_function": F.mse_loss,
         },
         False,
     )
+
+    # hyperparameter_tuning()
+
     # Fit the GMM model
-    model.fit_gmm(train_dataloader)
+    model.fit_gmm(train_loader)
     model.generate_images(
         root_path=str(data_dir), labels=[0, 1, 1, 0], file_name=f"{output_dir}/generated.png"
     )
@@ -242,5 +254,5 @@ if __name__ == "__main__":
         output_path=output_dir / "generated_from_checkpoint.png",
         latent_dim=128,
         n_classes=2,
-        gmm_dataloader=train_dataloader,
+        gmm_dataloader=train_loader,
     )

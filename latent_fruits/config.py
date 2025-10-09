@@ -15,16 +15,24 @@ class ProjectConfig:
         data_dir (Path): Directory for the dataset.
         output_dir (Path): Directory for output files.
         batch_size (int): Batch size for training.
+        learning_rate (float): Learning rate for the optimizer.
+        latent_dim (int): Dimensionality of the latent space.s
         beta (float): Weight for the KL divergence term in the loss function.
+        epochs (int): Number of training epochs.
         image_size (int): Size to which images are resized.
+        n_classes (int): Number of conditional classes.
         seed (int): Random seed for reproducibility.
     """
 
     data_dir: Path = Path("data")
     output_dir: Path = Path("output")
     batch_size: int = 64
+    learning_rate: float = 1e-3
+    latent_dim: int = 128
     beta: float = 1e-3
+    epochs: int = 20
     image_size: int = 100
+    n_classes: int = 2
     seed: int = 42
 
     def with_updates(self, **overrides: Any) -> "ProjectConfig":
