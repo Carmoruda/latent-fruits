@@ -1,20 +1,25 @@
-# Variational Autoencoder for Cat Images
+# Conditional VAE for Fruit Images
 
-This project trains a convolutional Variational Autoencoder (VAE) on cat images and augments its latent space with a Gaussian Mixture Model (GMM) to synthesize new samples. It includes utilities to split the dataset, monitor validation loss, and optionally run large-scale hyperparameter sweeps with Ray Tune.
+This project trains a convolutional Variational Autoencoder (CVAE) on fruit imagery (apples, bananas, and any additional classes you plug in), then augments its latent space with Gaussian Mixture Models (GMMs) to generate new samples. The codebase exposes a reusable training pipeline so you can embed the workflow in other scripts or run large-scale experiments with Ray Tune.
 
 ## Features
-- Convolutional VAE with configurable latent dimensionality.
-- Automatic device selection (CUDA, Apple MPS, or CPU).
-- Train/validation/test split with reconstruction visualizations saved to disk.
-- Optional Gaussian Mixture Model fitting on the latent space for guided sampling.
-- Ray Tune integration for hyperparameter exploration using an ASHA scheduler.
+- Convolutional CVAE with configurable latent dimensionality and conditional labels.
+- Automatic device selection (CUDA, Apple MPS, or CPU) plus reproducible seeding helpers.
+- Balanced train/validation/test splits with reconstruction plots written to disk.
+- Optional class-conditional Gaussian Mixture Models for guided sampling.
+- Ray Tune integration via a lightweight pipeline function exposed in `latent_fruits.training`.
+- YAML-driven configuration (`latent_fruits.config.ProjectConfig`) so hyperparameters stay versionable.
 
 ## Project Structure
-- `main.py`: Entry point for training, evaluation, and Ray Tune integration.
-- `vae/dataset.py`: Dataset helper that downloads (optional) and loads images from a Kaggle cat dataset.
-- `vae/model.py`: VAE definition, training loop, latent-space GMM utilities, and plotting helpers.
-- `data/`: Expected location of raw input images (ignored by Git).
-- `output/`: Generated figures such as reconstructions and synthetic samples.
+- `main.py`: CLI entry point that loads a config, seeds everything, and invokes the training pipeline.
+- `latent_fruits/config.py`: Dataclass definition + YAML loader for project-wide configuration.
+- `latent_fruits/training.py`: End-to-end training utilities (data prep, epoch loop, plotting, GMM fitting).
+- `latent_fruits/utils.py`: Shared helpers (e.g., deterministic seeding).
+- `vae/model.py`: Pure CVAE module (network definition + checkpoint loader).
+- `vae/dataset.py`: Dataset helper capable of downloading Kaggle archives (for example fruit datasets) and de-duplicating files.
+- `configs/`: Example YAML configs (e.g., `configs/local.yaml`).
+- `data/`: Staging area for images (Git-ignored).
+- `output/`: Generated figures, checkpoints, and logs.
 
 ## Getting Started
 ### Prerequisites
@@ -32,36 +37,63 @@ pip install -r requirements.txt
 The pinned versions cover PyTorch, TorchVision, Ray Tune, scikit-learn, matplotlib, Pillow, and their runtime dependencies. If you need a wheel tailored for CUDA or MPS, edit `requirements.txt` (or reinstall PyTorch) following the [official instructions](https://pytorch.org/get-started/locally/).
 
 ### Dataset Setup
-By default, `main.py` instantiates `VAEDataset` with `download=False`, so it expects images to already be present under `data/`.
+By default, `main.py` expects images to already exist under `data/`. You can point each class label at any folder (e.g., `data/apple`, `data/banana`), swap in your own fruit photos, or adapt the paths to other domains.
 
-1. **Manual download:** Obtain the [Kaggle Cats dataset](https://www.kaggle.com/borhanitrash/cat-dataset) manually and extract the images into the `data/` directory.
-2. **Automatic download:** Set `download=True` when constructing `VAEDataset` (see `main.py`) and make sure your Kaggle API credentials are available as environment variables (`KAGGLE_USERNAME`, `KAGGLE_KEY`). The helper will download the archive, extract images, and clean up temporary files.
+1. **Manual download:** Obtain the fruit image sets you need (for example, Kaggle’s [Fresh and Rotten Fruits](https://www.kaggle.com/datasets/maysee/fresh-and-rotten-fruits) or any other collection) and extract the images into the appropriate subdirectories beneath `data/`.
+2. **Automatic download:** Set `download: true` in your config (or pass it via CLI overrides) and make sure your Kaggle API credentials are available as environment variables (`KAGGLE_USERNAME`, `KAGGLE_KEY`). The dataset helper streams the zip to disk, extracts it, deduplicates files, and cleans up temporary artifacts.
 
 Ensure `data/` only contains image files (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.gif`). The dataset loader raises a descriptive error if no images are found.
 
 ## Usage
-### Train the VAE
+### Configuration Basics
+Hyperparameters live in YAML under `configs/`. The default `configs/local.yaml` looks like:
+
+```yaml
+data_dir: data
+output_dir: output
+batch_size: 128
+learning_rate: 1e-3
+latent_dim: 128
+beta: 1e-4
+epochs: 20
+n_classes: 2
+seed: 2025
+download: false
+```
+
+Every field maps to `ProjectConfig`, so you can add overrides directly in YAML or programmatically via `ProjectConfig.with_updates(...)`.
+
+### Train the VAE from the CLI
 ```bash
 python main.py
 ```
 The script will:
-- create train/validation/test splits (80/10/10),
-- train for the configured number of epochs (`epochs` in `train_vae`),
+- load `configs/local.yaml`, ensure the data/output directories exist, and seed RNGs,
+- build balanced dataset splits (80/10/10),
+- train for the configured number of epochs (`epochs` in the config),
 - write `output/reconstructions.png` with original vs. reconstructed samples,
 - fit a GMM on the latent space using the training split,
 - and save `output/generated.png` with images sampled from the latent space (GMM-driven when available).
 
-Key hyperparameters live in `main.py`:
-- `lr`: Adam learning rate.
-- `latent_dim`: Latent space dimensionality.
-- `epochs`: Number of training epochs.
-Adjust them directly or wire in a configuration loader if needed.
+If you want to reuse the training pipeline from another script or a notebook:
+
+```python
+from pathlib import Path
+from latent_fruits import training, load_config
+
+config = load_config(Path("configs/local.yaml"))
+model, train_loader, _, test_loader = training.run_training_pipeline(
+    config.__dict__,
+    data_dir=Path(config.data_dir),
+    output_dir=Path(config.output_dir),
+)
+```
 
 ### Hyperparameter Tuning
-Uncomment the `hyperparameter_tuning()` call in `main.py` to launch a Ray Tune sweep across learning rate, latent dimension, and epoch counts. Results are reported to the Ray dashboard (if running) and the best configuration is printed on completion. You can refine the search space or scheduler strategy in `hyperparameter_tuning()`.
+Uncomment the `hyperparameter_tuning()` call in `main.py` (or invoke it manually) to launch a Ray Tune sweep across learning rate, latent dimension, loss functions, and epoch counts. Each trial calls the same pipeline under the hood, and metrics are reported via Ray’s callback. Feel free to extend `search_space` with additional parameters (e.g., `batch_size`, `beta`).
 
 ### Generating Images
-After training, `model.generate_images()` samples from the latent distribution (using the fitted GMM when available) and writes a grid of generated images to the `output/` directory. Modify the `num_images` argument to control how many samples are produced.
+After training, the GMM is fitted on demand and you can export new samples either by running `main.py` (see the bottom of the file) or programmatically via `latent_fruits.training.generate_images`. The helper saves a grid to disk and returns the tensor so you can embed it in notebooks.
 
 ## Notes & Tips
 - Training on CPU is feasible for quick experiments but significantly slower than using a GPU or Apple Silicon.
@@ -74,4 +106,4 @@ After training, `model.generate_images()` samples from the latent distribution (
 - **Kaggle download failures:** Confirm your Kaggle API credentials are set and that the dataset is accessible. Alternatively, download manually and set `download=False`.
 - **Matplotlib backend issues in headless environments:** Configure a non-interactive backend (e.g., `matplotlib.use("Agg")`) before imports if needed.
 
-Happy training!
+Happy training! Tag us if you generate something fun 🍎🍌
