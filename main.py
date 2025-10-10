@@ -5,13 +5,12 @@ import torch
 import torch.nn.functional as F
 from ray import train, tune
 from ray.tune.schedulers import ASHAScheduler
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, random_split
-from torchvision import transforms
+from torch.utils.data import DataLoader
 
 from latent_fruits import load_config, seed_everything
-from vae import CVAE, CVAEDataset
-from vae.model import BATCH_SIZE, DEVICE
+from latent_fruits import training as training_utils
+from vae import CVAE
+from vae.model import DEVICE
 
 
 def train_vae(config, report=True):
@@ -19,98 +18,15 @@ def train_vae(config, report=True):
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create the dataset
-    transform = transforms.Compose(
-        [
-            transforms.Grayscale(num_output_channels=1),
-            transforms.ToTensor(),
-        ]
+    report_callback = train.report if report else None
+
+    model, train_dataloader, _, test_dataloader = training_utils.run_training_pipeline(
+        config,
+        data_dir=data_dir,
+        output_dir=output_dir,
+        report_callback=report_callback,
+        device=DEVICE,
     )
-
-    anime_dataset = CVAEDataset(
-        "https://www.kaggle.com/api/v1/datasets/download/soumikrakshit/anime-faces",
-        str(data_dir) + "/apple",
-        download=False,
-        transform=transform,
-        label=1,
-        extracted_folder="data",
-        delete_extracted=False,
-    )
-
-    cat_dataset = CVAEDataset(
-        "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
-        str(data_dir) + "/banana",
-        download=False,
-        transform=transform,
-        label=0,
-        extracted_folder="cats",
-        delete_extracted=True,
-    )
-
-    # Downsample each domain so both have the same number of images
-    def balance_dataset(dataset: CVAEDataset, target_length: int) -> Dataset:
-        if len(dataset) <= target_length:
-            return dataset
-
-        generator = torch.Generator()
-        indices = torch.randperm(len(dataset), generator=generator)[:target_length].tolist()
-        return Subset(dataset, indices)
-
-    balanced_length = min(len(cat_dataset), len(anime_dataset))
-    cat_dataset = balance_dataset(cat_dataset, balanced_length)
-    anime_dataset = balance_dataset(anime_dataset, balanced_length)
-
-    def split_dataset(dataset, train_fraction=0.8, val_fraction=0.1):
-        train_size = int(train_fraction * len(dataset))
-        val_size = int(val_fraction * len(dataset))
-        test_size = len(dataset) - train_size - val_size
-        return random_split(dataset, [train_size, val_size, test_size])
-
-    cat_train, cat_val, cat_test = split_dataset(cat_dataset)
-    anime_train, anime_val, anime_test = split_dataset(anime_dataset)
-
-    train_dataset = ConcatDataset([cat_train, anime_train])
-    val_dataset = ConcatDataset([cat_val, anime_val])
-    test_dataset = ConcatDataset([cat_test, anime_test])
-
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-
-    # Model, Optimizer
-    model = CVAE(
-        latent_dim=config["latent_dim"], n_classes=config["n_classes"], beta=config["beta"]
-    ).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=2)
-    loss_function = config.get("loss_function", F.mse_loss)
-
-    for current_epoch in range(config["epochs"]):
-        _, val_loss = model.train_model(
-            loss_function,
-            train_dataloader,
-            val_dataloader,
-            optimizer,
-            scheduler,
-            epoch=current_epoch,
-            num_epochs=config["epochs"],
-        )  # Train for 1 epoch
-
-        # Report metrics to Ray Tune
-        if report:
-            metrics = {"loss": val_loss[-1]}
-            if model.current_lr is not None:
-                metrics["lr"] = model.current_lr
-            train.report(metrics)
-
-    model.plot_reconstructions(
-        dataloader=DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False),
-        root_path=str(data_dir),
-        file_name=f"{output_dir}/reconstructions.png",
-    )
-
-    if model.lr_history:
-        model.plot_learning_rate(file_name=f"{output_dir}/lr_schedule.png")
 
     return model, test_dataloader, train_dataloader
 
@@ -154,12 +70,17 @@ def load_model_and_generate(
     )
 
     if gmm_dataloader is not None:
-        model.fit_gmm(gmm_dataloader)
+        training_utils.fit_gmm(
+            model,
+            gmm_dataloader,
+            n_components=model.n_components,
+        )
 
-    return model.generate_images(
-        root_path=str(output_path.parent),
+    return training_utils.generate_images(
+        model,
         labels=list(labels),
-        file_name=str(output_path),
+        root_path=output_path.parent,
+        file_name=output_path,
     )
 
 
@@ -237,6 +158,8 @@ if __name__ == "__main__":
             "n_classes": config.n_classes,
             "loss_function": F.mse_loss,
             "beta": config.beta,
+            "batch_size": config.batch_size,
+            "seed": config.seed,
         },
         False,
     )
@@ -244,9 +167,12 @@ if __name__ == "__main__":
     # hyperparameter_tuning()
 
     # Fit the GMM model
-    model.fit_gmm(train_loader)
-    model.generate_images(
-        root_path=str(data_dir), labels=[0, 1, 1, 0], file_name=f"{output_dir}/generated.png"
+    training_utils.fit_gmm(model, train_loader, n_components=model.n_components)
+    training_utils.generate_images(
+        model,
+        labels=[0, 1, 1, 0],
+        root_path=data_dir,
+        file_name=output_dir / "generated.png",
     )
     model_save_path = output_dir / "trained_model.pth"
     torch.save(model.state_dict(), model_save_path)
@@ -255,7 +181,7 @@ if __name__ == "__main__":
         checkpoint_path=model_save_path,
         labels=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
         output_path=output_dir / "generated_from_checkpoint.png",
-        latent_dim=128,
-        n_classes=2,
+        latent_dim=config.latent_dim,
+        n_classes=config.n_classes,
         gmm_dataloader=train_loader,
     )
