@@ -60,8 +60,8 @@ def prepare_dataloaders(
         ]
     )
 
-    anime_dataset = CVAEDataset(
-        "https://www.kaggle.com/api/v1/datasets/download/soumikrakshit/anime-faces",
+    apple_dataset = CVAEDataset(
+        "",
         str(data_dir / "apple"),
         download=download,
         transform=transform,
@@ -70,19 +70,19 @@ def prepare_dataloaders(
         delete_extracted=False,
     )
 
-    cat_dataset = CVAEDataset(
-        "https://www.kaggle.com/api/v1/datasets/download/borhanitrash/cat-dataset",
+    banana_dataset = CVAEDataset(
+        "",
         str(data_dir / "banana"),
         download=download,
         transform=transform,
         label=0,
-        extracted_folder="cats",
+        extracted_folder="data",
         delete_extracted=True,
     )
 
-    balanced_length = min(len(cat_dataset), len(anime_dataset))
-    cat_dataset = _balance_dataset(cat_dataset, balanced_length, seed=seed)
-    anime_dataset = _balance_dataset(anime_dataset, balanced_length, seed=seed)
+    balanced_length = min(len(banana_dataset), len(apple_dataset))
+    banana_dataset = _balance_dataset(banana_dataset, balanced_length, seed=seed)
+    apple_dataset = _balance_dataset(apple_dataset, balanced_length, seed=seed)
 
     def split_dataset(
         dataset: Dataset, *, generator: torch.Generator
@@ -100,12 +100,12 @@ def prepare_dataloaders(
     if seed is not None:
         split_generator.manual_seed(seed)
 
-    cat_train, cat_val, cat_test = split_dataset(cat_dataset, generator=split_generator)
-    anime_train, anime_val, anime_test = split_dataset(anime_dataset, generator=split_generator)
+    banana_train, banana_val, banana_test = split_dataset(banana_dataset, generator=split_generator)
+    apple_train, apple_val, apple_test = split_dataset(apple_dataset, generator=split_generator)
 
-    train_dataset = ConcatDataset([cat_train, anime_train])
-    val_dataset = ConcatDataset([cat_val, anime_val])
-    test_dataset = ConcatDataset([cat_test, anime_test])
+    train_dataset = ConcatDataset([banana_train, apple_train])
+    val_dataset = ConcatDataset([banana_val, apple_val])
+    test_dataset = ConcatDataset([banana_test, apple_test])
 
     loader_generator = torch.Generator()
     if seed is not None:
