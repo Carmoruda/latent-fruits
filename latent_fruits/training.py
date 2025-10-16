@@ -322,8 +322,8 @@ def train_model(
             if reconstruction_loss.ndim > 0:
                 reconstruction_loss = reconstruction_loss.mean()
 
-        kl_divergence_loss = _kl_divergence_from_stats(latent_stats)
-        loss = reconstruction_loss + (beta * kl_divergence_loss)
+        kl_divergence_loss = _kl_divergence_from_stats(latent_stats) / len(images)
+        loss = (reconstruction_loss + (beta * kl_divergence_loss)) / len(images)
 
         optimizer.zero_grad()
         loss.backward()
@@ -359,8 +359,8 @@ def train_model(
                 if reconstruction_loss.ndim > 0:
                     reconstruction_loss = reconstruction_loss.mean()
 
-            kl_divergence_loss = _kl_divergence_from_stats(latent_stats)
-            loss = reconstruction_loss + (beta * kl_divergence_loss)
+            kl_divergence_loss = _kl_divergence_from_stats(latent_stats) / len(images)
+            loss = (reconstruction_loss + (beta * kl_divergence_loss)) / len(images)
 
             batch_size = images.size(0)
             total_val_loss += loss.item() * batch_size
