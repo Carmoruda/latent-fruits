@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sized
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence, cast
-from collections.abc import Sized
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,10 +15,29 @@ from torchvision import transforms
 
 from vae import CVAE, CVAEDataset
 
+LOGVAR_MIN = -10.0
+"""Minimum value for log-variance to ensure numerical stability."""
+
+LOGVAR_MAX = 10.0
+"""Maximum value for log-variance to ensure numerical stability."""
+
 
 def _get_device(model: torch.nn.Module, override: Optional[torch.device]) -> torch.device:
+    """Get the device of the model parameters or use the override if provided.
+
+    Args:
+        model (torch.nn.Module): The model to check.
+        override (Optional[torch.device]): An optional device to use instead.
+
+    Returns:
+        torch.device: The device of the model parameters or the override.
+    """
+
+    # If an override device is provided, use it
     if override is not None:
         return override
+
+    # Otherwise, get the device of the model parameters
     try:
         return next(model.parameters()).device  # type: ignore[call-arg]
     except StopIteration:
@@ -31,6 +50,18 @@ def _balance_dataset(
     *,
     seed: Optional[int],
 ) -> Dataset:
+    """
+    Balance the dataset to the target length by random sampling without replacement.
+
+    Args:
+        dataset (Dataset): The dataset to balance.
+        target_length (int): The target length for the balanced dataset.
+        seed (Optional[int]): A seed for the random number generator.
+
+    Returns:
+        Dataset: A balanced dataset.
+    """
+
     dataset_size = len(cast(Sized, dataset))
 
     if dataset_size <= target_length:
@@ -51,7 +82,17 @@ def prepare_dataloaders(
     seed: Optional[int],
     download: bool = False,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """Create balanced train/val/test dataloaders for the project datasets."""
+    """Create balanced train/val/test dataloaders for the project datasets.
+
+    Args:
+        data_dir (Path): Path to the directory containing the datasets.
+        batch_size (int): The batch size for the dataloaders.
+        seed (Optional[int]): A seed for the random number generator.
+        download (bool, optional): Whether to download the datasets if they are not found. Defaults to False.
+
+    Returns:
+        tuple[DataLoader, DataLoader, DataLoader]: The train, validation, and test dataloaders.
+    """
 
     transform = transforms.Compose(
         [
@@ -100,7 +141,9 @@ def prepare_dataloaders(
     if seed is not None:
         split_generator.manual_seed(seed)
 
-    banana_train, banana_val, banana_test = split_dataset(banana_dataset, generator=split_generator)
+    banana_train, banana_val, banana_test = split_dataset(
+        banana_dataset, generator=split_generator
+    )
     apple_train, apple_val, apple_test = split_dataset(apple_dataset, generator=split_generator)
 
     train_dataset = ConcatDataset([banana_train, apple_train])
@@ -131,7 +174,18 @@ def run_training_pipeline(
     report_callback: Optional[Callable[[dict[str, float]], None]] = None,
     device: Optional[torch.device] = None,
 ) -> tuple[CVAE, DataLoader, DataLoader, DataLoader]:
-    """High-level helper that prepares data, trains the model, and logs metrics."""
+    """High-level helper that prepares data, trains the model, and logs metrics.
+
+    Args:
+        config (Mapping[str, Any]): Configuration dictionary.
+        data_dir (Path): Path to the directory containing the datasets.
+        output_dir (Path): Path to the directory where the output will be saved.
+        report_callback (Optional[Callable[[dict[str, float]], None]], optional): Callback function to report metrics. Defaults to None.
+        device (Optional[torch.device], optional): Device to run the training on. Defaults to None.
+
+    Returns:
+        tuple[CVAE, DataLoader, DataLoader, DataLoader]: The trained model and the dataloaders.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -146,11 +200,16 @@ def run_training_pipeline(
         download=bool(cfg.get("download", False)),
     )
 
+    extra_latent_dims = cfg.get("extra_latent_dims")
+    if extra_latent_dims is not None:
+        extra_latent_dims = [int(dim) for dim in cast(Sequence[int], extra_latent_dims)]
+
     model = CVAE(
         latent_dim=int(cfg["latent_dim"]),
         n_classes=int(cfg["n_classes"]),
         beta=float(cfg.get("beta", 1e-3)),
         n_components=int(cfg.get("n_components", 10)),
+        extra_latent_dims=extra_latent_dims,
     )
     model_device = _get_device(model, device)
     model.to(model_device)
@@ -195,6 +254,7 @@ def run_training_pipeline(
 
     return model, train_loader, val_loader, test_loader
 
+
 def train_model(
     model: CVAE,
     loss_function: Optional[Callable[..., torch.Tensor]],
@@ -212,6 +272,21 @@ def train_model(
 
     Returns lists containing a single element each to keep backward compatibility
     with the previous API (train/val loss histories).
+
+    Args:
+        model (CVAE): The CVAE model to train.
+        loss_function (Optional[Callable[..., torch.Tensor]]): Loss function to use during training.
+        train_dataloader (DataLoader): DataLoader for the training set.
+        val_dataloader (DataLoader): DataLoader for the validation set.
+        optimizer (torch.optim.Optimizer): Optimizer for updating model parameters.
+        scheduler (ReduceLROnPlateau): Learning rate scheduler.
+        epoch (int): Current training epoch.
+        num_epochs (int): Total number of training epochs.
+        beta (float): Weight for the KL divergence loss.
+        device (Optional[torch.device], optional): Device to run the training on. Defaults to None.
+
+    Returns:
+        tuple[list[float], list[float]]: Training and validation loss histories.
     """
 
     model_device = _get_device(model, device)
@@ -237,22 +312,18 @@ def train_model(
 
         y_onehot = F.one_hot(labels, num_classes=model.n_classes).float()
 
-        reconstructed_images, mu, logvar = model(images, y_onehot)
+        reconstructed_images, latent_stats = model(images, y_onehot)
 
         try:
-            reconstruction_loss = loss_function(
-                reconstructed_images, images, reduction="sum"
-            )  # type: ignore[misc]
+            reconstruction_loss = loss_function(reconstructed_images, images, reduction="sum")  # type: ignore[misc]
             reconstruction_loss = reconstruction_loss / images.size(0)
         except TypeError:
             reconstruction_loss = loss_function(reconstructed_images, images)
             if reconstruction_loss.ndim > 0:
                 reconstruction_loss = reconstruction_loss.mean()
 
-        kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        kl_divergence_loss = kl_divergence_loss / images.size(0)
-
-        loss = (reconstruction_loss / len(images)) + (beta * kl_divergence_loss) / len(images)
+        kl_divergence_loss = _kl_divergence_from_stats(latent_stats)
+        loss = reconstruction_loss + (beta * kl_divergence_loss)
 
         optimizer.zero_grad()
         loss.backward()
@@ -276,7 +347,7 @@ def train_model(
             labels = labels.to(model_device)
             y_onehot = F.one_hot(labels, num_classes=model.n_classes).float()
 
-            reconstructed_images, mu, logvar = model(images, y_onehot)
+            reconstructed_images, latent_stats = model(images, y_onehot)
 
             try:
                 reconstruction_loss = loss_function(
@@ -288,10 +359,8 @@ def train_model(
                 if reconstruction_loss.ndim > 0:
                     reconstruction_loss = reconstruction_loss.mean()
 
-            kl_divergence_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-            kl_divergence_loss = kl_divergence_loss / images.size(0)
-
-            loss = (reconstruction_loss / len(images)) + (beta * kl_divergence_loss) / len(images)
+            kl_divergence_loss = _kl_divergence_from_stats(latent_stats)
+            loss = reconstruction_loss + (beta * kl_divergence_loss)
 
             batch_size = images.size(0)
             total_val_loss += loss.item() * batch_size
@@ -324,7 +393,17 @@ def fit_gmm(
     n_components: int,
     device: Optional[torch.device] = None,
 ) -> dict[int, GaussianMixture]:
-    """Fit a Gaussian Mixture Model to the latent space of the training data."""
+    """Fit a Gaussian Mixture Model to the latent space of the training data.
+
+    Args:
+        model (CVAE): The CVAE model to use.
+        train_dataloader (DataLoader): DataLoader for the training set.
+        n_components (int): Number of mixture components.
+        device (Optional[torch.device], optional): Device to use for computation. Defaults to None.
+
+    Returns:
+        dict[int, GaussianMixture]: Fitted Gaussian Mixture Models for each class.
+    """
 
     model_device = _get_device(model, device)
     model.eval()
@@ -337,9 +416,10 @@ def fit_gmm(
             labels = labels.to(model_device)
             y_onehot = F.one_hot(labels, num_classes=model.n_classes).float()
 
-            _, mu, _ = model(images, y_onehot)
+            _, latent_stats = model(images, y_onehot)
+            top_mu = latent_stats["level_0"]["mu"]
 
-            mu_np = mu.cpu().numpy()
+            mu_np = top_mu.cpu().numpy()
             labels_np = labels.cpu().numpy()
 
             for class_idx in range(model.n_classes):
@@ -360,7 +440,7 @@ def fit_gmm(
         samples = np.concatenate(class_latents, axis=0)
         class_gmm = GaussianMixture(
             n_components=n_components,
-            covariance_type="diag",
+            covariance_type="full",
             reg_covar=1e-6,
         )
 
@@ -379,7 +459,18 @@ def generate_images(
     file_name: Path,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
-    """Generate new images by sampling from the latent space."""
+    """Generate new images by sampling from the latent space.
+
+    Args:
+        model (CVAE): The CVAE model to use.
+        labels (Sequence[int]): The labels for the images to generate.
+        root_path (Path): The root path for saving generated images.
+        file_name (Path): The file name for saving generated images.
+        device (Optional[torch.device], optional): Device to use for computation. Defaults to None.
+
+    Returns:
+        torch.Tensor: The generated images.
+    """
 
     model_device = _get_device(model, device)
     model.eval()
@@ -394,28 +485,47 @@ def generate_images(
 
     with torch.no_grad():
         if getattr(model, "gmm", None):
-            samples = []
+            top_samples = []
             for label in labels:
                 class_gmm = model.gmm.get(label) if hasattr(model, "gmm") else None
                 if class_gmm is None:
-                    samples.append(torch.randn(1, model.latent_dim, device=model_device))
+                    top_samples.append(torch.randn(1, model.latent_dim, device=model_device))
                     continue
 
                 sample, _ = class_gmm.sample(1)
                 tensor_sample = torch.from_numpy(sample).to(
                     device=model_device, dtype=torch.float32
                 )
-                samples.append(tensor_sample)
+                top_samples.append(tensor_sample)
 
-            z = torch.cat(samples, dim=0).to(model_device)
+            z_top = torch.cat(top_samples, dim=0).to(model_device)
         else:
-            z = torch.randn(num_images, model.latent_dim, device=model_device)
+            z_top = torch.randn(num_images, model.latent_dim, device=model_device)
 
-        z_combined = torch.cat([z, y_onehot], dim=1)
+        latent_samples = [z_top]
+        parent_z = z_top
+
+        if getattr(model, "extra_latent_dims", None):
+            for level_idx, _ in enumerate(model.extra_latent_dims):
+                prior_input = torch.cat([parent_z, y_onehot], dim=1)
+                prior_mu = model.extra_prior_mu[level_idx](prior_input)
+                prior_logvar = model.extra_prior_logvar[level_idx](prior_input)
+                prior_logvar = torch.clamp(
+                    prior_logvar, min=model.logvar_min, max=model.logvar_max
+                )
+                std = torch.exp(0.5 * prior_logvar)
+                eps = torch.randn_like(std)
+                z_extra = prior_mu + eps * std
+
+                latent_samples.append(z_extra)
+                parent_z = z_extra
+
+        z_concat = torch.cat(latent_samples, dim=1)
+        z_combined = torch.cat([z_concat, y_onehot], dim=1)
         z_expanded = model.decoder_input(z_combined)
         generated_images = model.decoder(z_expanded)
 
-    _plot_generated_images(generated_images, root_path, file_name)
+    _plot_generated_images(generated_images, file_name)
     return generated_images
 
 
@@ -428,7 +538,16 @@ def plot_reconstructions(
     file_name: Path,
     device: Optional[torch.device] = None,
 ) -> None:
-    """Plot original and reconstructed images."""
+    """Plot original and reconstructed images.
+
+    Args:
+        model (CVAE): The CVAE model to use.
+        dataloader (DataLoader): DataLoader for the dataset.
+        root_path (Path): The root path for saving plots.
+        file_name (Path): The file name for saving plots.
+        num_images (int, optional): The number of images to plot. Defaults to 8.
+        device (Optional[torch.device], optional): Device to use for computation. Defaults to None.
+    """
 
     model_device = _get_device(model, device)
     model.eval()
@@ -442,13 +561,18 @@ def plot_reconstructions(
         labels = labels.to(model_device)[:num_images]
 
         y_onehot = F.one_hot(labels, num_classes=model.n_classes).float()
-        reconstructed_images, _, _ = model(images, y_onehot)
+        reconstructed_images, _ = model(images, y_onehot)
 
-    _plot_reconstructions(images, reconstructed_images, root_path, file_name)
+    _plot_reconstructions(images, reconstructed_images, file_name)
 
 
 def plot_learning_rate(model: CVAE, *, file_name: Path) -> None:
-    """Plot and save the learning rate schedule observed during training."""
+    """Plot and save the learning rate schedule observed during training.
+
+    Args:
+        model (CVAE): The CVAE model to use.
+        file_name (Path): The file name for saving the learning rate plot.
+    """
 
     lr_history = getattr(model, "lr_history", None)
     if not lr_history:
@@ -471,9 +595,15 @@ def plot_learning_rate(model: CVAE, *, file_name: Path) -> None:
 
 def _plot_generated_images(
     generated_images: torch.Tensor,
-    root_path: Path,
     file_name: Path,
 ) -> None:
+    """Plot and save generated images in a grid.
+
+    Args:
+        generated_images (torch.Tensor): The generated images to plot.
+        file_name (Path): The file name for saving the plot.
+    """
+
     num_images = generated_images.size(0)
 
     _, axes = plt.subplots(1, num_images, figsize=(num_images * 2, 2))
@@ -494,9 +624,16 @@ def _plot_generated_images(
 def _plot_reconstructions(
     images: torch.Tensor,
     reconstructed_images: torch.Tensor,
-    root_path: Path,
     file_name: Path,
 ) -> None:
+    """Plot and save original and reconstructed images side by side.
+
+    Args:
+        images (torch.Tensor): The input images.
+        reconstructed_images (torch.Tensor): The reconstructed images.
+        file_name (Path): The file name for saving the plot.
+    """
+
     num_images = images.size(0)
 
     _, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
@@ -515,3 +652,43 @@ def _plot_reconstructions(
     plt.tight_layout()
     plt.savefig(file_name)
     plt.close()
+
+
+def _kl_divergence_from_stats(
+    latent_stats: Mapping[str, Mapping[str, torch.Tensor]],
+) -> torch.Tensor:
+    """Compute KL divergence for potentially hierarchical latent statistics.
+
+    Args:
+        latent_stats (Mapping[str, Mapping[str, torch.Tensor]]): A dictionary containing latent statistics.
+
+    Returns:
+        torch.Tensor: The computed KL divergence.
+    """
+
+    reference = next(iter(latent_stats.values()))
+    kl_total = torch.zeros(
+        (),
+        device=reference["mu"].device,
+        dtype=reference["mu"].dtype,
+    )
+
+    for stats in latent_stats.values():
+        posterior_mu = stats["mu"]
+        posterior_logvar = torch.clamp(stats["logvar"], min=LOGVAR_MIN, max=LOGVAR_MAX)
+        prior_mu = stats["prior_mu"]
+        prior_logvar = torch.clamp(stats["prior_logvar"], min=LOGVAR_MIN, max=LOGVAR_MAX)
+
+        posterior_var = torch.exp(posterior_logvar).clamp_min(1e-6)
+        prior_var = torch.exp(prior_logvar).clamp_min(1e-6)
+
+        kl = 0.5 * (
+            prior_logvar
+            - posterior_logvar
+            + (posterior_var + (posterior_mu - prior_mu).pow(2)) / prior_var
+            - 1
+        )
+
+        kl_total = kl_total + kl.sum(dim=1).mean()
+
+    return kl_total
