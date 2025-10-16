@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import torch
 import torch.nn.functional as F
@@ -13,7 +13,17 @@ from vae import CVAE
 from vae.model import DEVICE
 
 
-def train_vae(config, report=True):
+def train_vae(config: Mapping[str, Any], report=True) -> tuple[CVAE, DataLoader, DataLoader]:
+    """Train a CVAE model based on the provided configuration.
+
+    Args:
+        config (Mapping[str, Any]): Configuration dictionary for training.
+        report (bool, optional): Whether to report intermediate results. Defaults to True.
+
+    Returns:
+        tuple[CVAE, DataLoader, DataLoader]: The trained model and the dataloaders.
+    """
+
     data_dir = Path(__file__).parent / "data"
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -39,6 +49,7 @@ def load_model_and_generate(
     latent_dim: int,
     n_classes: int,
     n_components: int = 10,
+    extra_latent_dims: Optional[Sequence[int]] = None,
     gmm_dataloader: Optional[DataLoader] = None,
     map_location: Optional[Union[torch.device, str]] = None,
 ) -> torch.Tensor:
@@ -51,6 +62,7 @@ def load_model_and_generate(
         latent_dim: Latent dimensionality used when the model was trained.
         n_classes: Number of conditional classes used during training.
         n_components: Number of Gaussian components per class when fitting the GMM.
+        extra_latent_dims: Additional latent levels if the model was hierarchical.
         gmm_dataloader: Optional dataloader; if provided the latent GMM is refitted before sampling.
         map_location: Optional device override for ``torch.load``.
 
@@ -66,6 +78,7 @@ def load_model_and_generate(
         latent_dim=latent_dim,
         n_classes=n_classes,
         n_components=n_components,
+        extra_latent_dims=extra_latent_dims,
         map_location=map_location,
     )
 
@@ -85,6 +98,8 @@ def load_model_and_generate(
 
 
 def hyperparameter_tuning():
+    """Perform hyperparameter tuning using Ray Tune."""
+
     # Define the search space for hyperparameters
     search_space = {
         "lr": tune.grid_search([1e-3, 1e-4, 1e-5]),
@@ -160,6 +175,9 @@ if __name__ == "__main__":
             "beta": config.beta,
             "batch_size": config.batch_size,
             "seed": config.seed,
+            "extra_latent_dims": list(config.extra_latent_dims)
+            if config.extra_latent_dims
+            else None,
         },
         False,
     )
@@ -183,5 +201,6 @@ if __name__ == "__main__":
         output_path=output_dir / "generated_from_checkpoint.png",
         latent_dim=config.latent_dim,
         n_classes=config.n_classes,
+        extra_latent_dims=config.extra_latent_dims,
         gmm_dataloader=train_loader,
     )
