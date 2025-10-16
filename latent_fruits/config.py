@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, get_args, get_origin, get_type_hints
+from typing import Any, Dict, Optional, Tuple, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -22,6 +22,7 @@ class ProjectConfig:
         image_size (int): Size to which images are resized.
         n_classes (int): Number of conditional classes.
         seed (int): Random seed for reproducibility.
+        extra_latent_dims (tuple[int, ...] | None): Additional latent dimensions for hierarchical VAE.
     """
 
     data_dir: Path = Path("data")
@@ -34,6 +35,7 @@ class ProjectConfig:
     image_size: int = 100
     n_classes: int = 2
     seed: int = 42
+    extra_latent_dims: Optional[Tuple[int, ...]] = None
 
     def with_updates(self, **overrides: Any) -> "ProjectConfig":
         """Return a new ProjectConfig with updated fields.
@@ -102,6 +104,21 @@ class ProjectConfig:
                     if lowered in {"false", "0", "no", "n", "off"}:
                         return False
                 return bool(value)
+            if origin in {tuple, list}:
+                element_types = get_args(target_type)
+                element_type = element_types[0] if element_types else Any
+
+                if not isinstance(value, (list, tuple)):
+                    raise ValueError(
+                        f"Invalid value for '{field_name}': expected a sequence, got {value!r}"
+                    )
+
+                converted_items = [
+                    ProjectConfig._coerce_value(field_name, item, element_type)
+                    for item in value
+                ]
+
+                return tuple(converted_items)
 
         except (TypeError, ValueError) as exc:
             raise ValueError(
